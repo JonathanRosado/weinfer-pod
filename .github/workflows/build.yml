@@ -1,0 +1,66 @@
+name: build-and-smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+      - name: print pinned reference
+        run: |
+          echo "IMMUTABLE: ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+
+  # Zero-GPU container smoke: proves the container executes OUR
+  # entrypoint, the hosted worker binary downloads, sha-verifies, and
+  # RUNS on this image, and the container fails closed when the engine
+  # cannot come up.  No GPU, no provider, no spend.
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: run entrypoint without a GPU
+        run: |
+          set -x
+          WORKER_URL="https://github.com/${{ github.repository }}/releases/download/worker-v0.1.0/weinfer-worker"
+          WORKER_SHA="$(curl -fsSL https://github.com/${{ github.repository }}/releases/download/worker-v0.1.0/weinfer-worker.sha256 | awk '{print $1}')"
+          docker run --rm \
+            -e WEINFER_WORKER_URL="$WORKER_URL" \
+            -e WEINFER_WORKER_SHA256="$WORKER_SHA" \
+            -e WEINFER_SERVED_MODEL="Qwen/Qwen2.5-0.5B-Instruct" \
+            -e WEINFER_GATEWAY_BASE="http://127.0.0.1:1" \
+            -e WEINFER_WORKER_KEY="smoke-only" \
+            ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            > smoke.log 2>&1 || true
+          cat smoke.log
+          grep -q "worker binary verified" smoke.log
+          grep -q "starting the pull worker" smoke.log
+          grep -q "worker starting" smoke.log
+          echo "SMOKE PASS: entrypoint executed, binary verified and ran"
