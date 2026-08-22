@@ -16,6 +16,8 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+      - name: lowercase image name (registries reject uppercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -27,11 +29,11 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
       - name: print pinned reference
         run: |
-          echo "IMMUTABLE: ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+          echo "IMMUTABLE: ${IMAGE}@${{ steps.push.outputs.digest }}"
 
   # Zero-GPU container smoke: proves the container executes OUR
   # entrypoint, the hosted worker binary downloads, sha-verifies, and
@@ -41,6 +43,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: lowercase image name (registries reject uppercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -57,7 +61,7 @@ jobs:
             -e WEINFER_SERVED_MODEL="Qwen/Qwen2.5-0.5B-Instruct" \
             -e WEINFER_GATEWAY_BASE="http://127.0.0.1:1" \
             -e WEINFER_WORKER_KEY="smoke-only" \
-            ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            "${IMAGE}:${{ github.sha }}" \
             > smoke.log 2>&1 || true
           cat smoke.log
           grep -q "worker binary verified" smoke.log
