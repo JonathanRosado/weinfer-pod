@@ -12,6 +12,7 @@ permissions:
 
 env:
   GATEWAY_TAG: gateway-v0.2.0
+  WORKER_TAG: worker-v0.4.0
 
 jobs:
   build:
@@ -155,12 +156,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: sealed-evidence regression (the deployment sells what was measured)
+      - name: sealed-evidence regression (no claim beyond the sealed record)
         run: |
           DEPLOY_SCRIPT=ci/deploy_controlplane.sh \
-          EVIDENCE_FILE=ci/pair_verdict.updated-1787440344.json \
-          PROBE_FILE=ci/stacked_probe.sh \
+          CONTRACT_FILE=ci/run_contract.stacked.json \
             bash controlplane/ci/profile_evidence_regression.sh
+      - name: GPU watchdog regression (official v2 shape, churn-proof cap)
+        run: |
+          FAKE=ci/fake_runpod_official.py WATCHDOG=ci/gpu_watchdog.sh \
+            bash controlplane/ci/watchdog_regression.sh
       - name: managed drain regression
         run: |
           set -x
@@ -193,19 +197,14 @@ jobs:
             sleep 2
           done
           docker logs mcp 2>&1 | grep -q "derived WEINFER_PUBLIC_BASE=https://fakecp-8080.proxy.runpod.net"
-          # The COMPLETE customer path (same driver as production),
-          # run-scoped: a retry of run ci1 must REPLAY (same job, no
-          # double fund, unchanged reservation); run ci2 must DISPATCH.
+          # The COMPLETE customer path with REAL settlement: the
+          # actual released worker binary completes the jobs against a
+          # fake engine.  Run ci1 polls to completion in the
+          # background while the create fires and the worker comes up.
           printf 'WEINFER_ADMIN_KEY=ci-admin\n' > creds.env
-          CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=0 \
-            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
-          J1=$(cat /tmp/canary-ci1.job)
-          CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=0 \
-            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
-          [ "$(cat /tmp/canary-ci1.job)" = "$J1" ] || { echo "retry did NOT replay"; exit 1; }
-          CANARY_RUN_ID=ci2 CANARY_EXPECT_COMPLETION=0 \
-            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
-          [ "$(cat /tmp/canary-ci2.job)" != "$J1" ] || { echo "new run did NOT dispatch"; exit 1; }
+          CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env \
+            > canary-ci1.log 2>&1 & CANARY_PID=$!
           # The accepted demand must drive a fake GPU create carrying
           # the derived callback + pinned provenance + cheapest SKU.
           # BootForDeadline fires when remaining <= boot(452s) +
@@ -227,6 +226,37 @@ jobs:
           assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
           print("CREATE BODY PROVEN: derived callback + pinned provenance + cheapest measured SKU")
           PYEOF
+          # The REAL released worker against the fake engine: the
+          # minted pod credential comes from the create body itself.
+          WORKER_KEY=$(python3 -c "import json;print(json.loads(open('/tmp/fake-runpod-bodies.jsonl').readline())['env']['WEINFER_WORKER_KEY'])")
+          curl -fsSL -o weinfer-worker "https://github.com/${{ github.repository }}/releases/download/${WORKER_TAG}/weinfer-worker"
+          W_SHA=$(curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${WORKER_TAG}/weinfer-worker.sha256" | awk '{print $1}')
+          echo "${W_SHA}  weinfer-worker" | sha256sum -c -
+          chmod +x weinfer-worker
+          rm -f /tmp/fake-engine-requests.jsonl
+          python3 controlplane/ci/fake_engine.py 18999 &
+          WEINFER_GATEWAY_BASE=http://127.0.0.1:8080 \
+          WEINFER_ENGINE_BASE=http://127.0.0.1:18999 \
+          WEINFER_WORKER_KEY="$WORKER_KEY" \
+          WEINFER_SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct" \
+            ./weinfer-worker > worker.log 2>&1 &
+          # ci1 completes end to end: frozen-rate charge, canary-ok
+          # content, hold release, conservation — all asserted by the
+          # driver itself.
+          wait "$CANARY_PID" || { cat canary-ci1.log; tail -20 worker.log; exit 1; }
+          cat canary-ci1.log
+          J1=$(cat /tmp/canary-ci1.job)
+          # Retry of ci1: replays the COMPLETED state (settled ledger,
+          # conservation) without minting a key or double-funding.
+          CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+          [ "$(cat /tmp/canary-ci1.job)" = "$J1" ] || { echo "retry did NOT replay"; exit 1; }
+          # A NEW run id completes a DISTINCT engine call end to end.
+          CANARY_RUN_ID=ci2 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+          [ "$(cat /tmp/canary-ci2.job)" != "$J1" ] || { echo "new run did NOT dispatch"; exit 1; }
+          CALLS=$(wc -l < /tmp/fake-engine-requests.jsonl)
+          [ "$CALLS" -ge 2 ] || { echo "expected >=2 distinct engine calls, got $CALLS"; exit 1; }
           CREATES_BEFORE=$(wc -l < /tmp/fake-runpod-bodies.jsonl)
           : > /tmp/fake-runpod-deletes.log || true
           # SIGTERM drain: docker stop must terminate the held pod.

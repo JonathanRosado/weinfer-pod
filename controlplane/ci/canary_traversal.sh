@@ -48,9 +48,17 @@ say "1/8 durable organization ${ORG}"
 admin POST /admin/organizations \
   "{\"org_id\":\"${ORG}\",\"name\":\"Canary ${RUN_ID}\"}" >/dev/null 2>&1 || true
 
-say "2/8 issue the customer credential (raw from the API; held in memory only)"
-CUSTOMER_KEY=$(admin POST "/admin/organizations/${ORG}/keys" '{}' \
-  | python3 -c "import json,sys;print(json.load(sys.stdin)['raw_key'])")
+KEY_STORE="${CANARY_KEY_STORE:-$HOME/.weinfer}/canary-${RUN_ID}.key"
+if [ -f "$KEY_STORE" ]; then
+  say "2/8 reusing this run's persisted credential (retry — no new key minted)"
+  CUSTOMER_KEY=$(cat "$KEY_STORE")
+else
+  say "2/8 issue the customer credential (persisted 0600, bound to the run id)"
+  CUSTOMER_KEY=$(admin POST "/admin/organizations/${ORG}/keys" '{}' \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['raw_key'])")
+  mkdir -p "$(dirname "$KEY_STORE")"; chmod 700 "$(dirname "$KEY_STORE")" 2>/dev/null || true
+  umask 077; printf '%s' "$CUSTOMER_KEY" > "$KEY_STORE"; chmod 600 "$KEY_STORE"
+fi
 
 say "3/8 bounded credit grant (\$2.00 once per run id — a RETRY never double-funds)"
 FUNDED=$(balance | python3 -c "import json,sys;print(json.load(sys.stdin)['credits_micro_usd'])")
@@ -72,7 +80,8 @@ m = m[0]
 assert m['pricing']['input_micro_usd_per_mtok'] == 100000, m['pricing']
 assert m['pricing']['output_micro_usd_per_mtok'] == 400000, m['pricing']
 assert m['context_length'] == 8192, m
-print('   model priced exactly; routable =', m['routable'])
+assert m['routable'] is True, (m, 'the model must be ROUTABLE before the canary submits')
+print('   model priced exactly and routable')
 "
 
 say "5/8 submit + idempotent replay (idempotency key ${IDEM})"
@@ -91,9 +100,18 @@ import json, sys
 credits, hold = int(sys.argv[1]), int(sys.argv[2])
 b = json.loads(sys.argv[3])
 assert b['credits_micro_usd'] == credits, b
-assert b['reserved_micro_usd'] == hold, (b, 'the reservation must be the EXACT ceil-per-side derivation')
-assert b['available_micro_usd'] == credits - hold, b
-print('   reservation exact:', hold, 'micro; available', b['available_micro_usd'])
+if b['reserved_micro_usd'] == hold:
+    # LIVE state: the exact ceil-per-side reservation is held.
+    assert b['available_micro_usd'] == credits - hold, b
+    assert b['spent_micro_usd'] == 0, b
+    print('   reservation exact:', hold, 'micro; available', b['available_micro_usd'])
+elif b['reserved_micro_usd'] == 0 and b['spent_micro_usd'] > 0:
+    # RETRY AFTER COMPLETION: the hold released at settlement; the
+    # conservation identity is the valid claim in this state.
+    assert b['available_micro_usd'] + b['spent_micro_usd'] == credits, (b, 'conservation')
+    print('   replay of a COMPLETED run: settled', b['spent_micro_usd'], 'micro; conservation holds')
+else:
+    raise AssertionError((b, 'neither a live reservation nor a settled replay state'))
 PY
 R2=$(curl -fsS -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
   -H "Content-Type: application/json" -H "Idempotency-Key: ${IDEM}" \
@@ -101,14 +119,15 @@ R2=$(curl -fsS -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" 
 JOB_ID2=$(echo "$R2" | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
 [ "$JOB_ID" = "$JOB_ID2" ] || { echo "replay returned a DIFFERENT job" >&2; exit 1; }
 
-say "6/8 replay held the ledger still (no double reservation)"
-python3 - "$CREDITS" "$EXPECT_HOLD" "$(balance)" <<'PY'
+say "6/8 replay held the ledger still (no double reservation, no double charge)"
+python3 - "$CREDITS" "$EXPECT_HOLD" "$B1" "$(balance)" <<'PY'
 import json, sys
 credits, hold = int(sys.argv[1]), int(sys.argv[2])
-b = json.loads(sys.argv[3])
-assert b['reserved_micro_usd'] == hold, (b, 'replay must not double-reserve')
-assert b['available_micro_usd'] == credits - hold, b
-print('   replay identical; reservation unchanged')
+before, after = json.loads(sys.argv[3]), json.loads(sys.argv[4])
+assert after['reserved_micro_usd'] in (hold, 0), (after, 'replay must not double-reserve')
+assert after['available_micro_usd'] + after['spent_micro_usd'] + after['reserved_micro_usd'] == credits, (after, 'conservation')
+assert after['spent_micro_usd'] >= before['spent_micro_usd'], (before, after)
+print('   replay identical; ledger conserved')
 PY
 say "   job ${JOB_ID} (replay identical)"
 printf '%s' "$JOB_ID" > "/tmp/canary-${RUN_ID}.job"
@@ -126,10 +145,15 @@ if [ "$EXPECT_COMPLETION" = "1" ]; then
   done
   say "8/8 frozen-rate charge, hold release, balance conservation"
   python3 - "$MAX_TOKENS" "$S" <<'PY'
-import json, sys
+import json, re, sys
 max_tokens = int(sys.argv[1])
 s = json.loads(sys.argv[2])
 assert s['reconciliation'] == 'billed', s
+# A wrong answer is NOT a successful task: the model was told to
+# reply exactly canary-ok.
+content = s['response']['choices'][0]['message']['content']
+assert 'canary-ok' in re.sub(r'\s+', ' ', content.strip().lower()), (
+    'model output does not contain canary-ok', content)
 u, c = s['usage'], s['charge']
 assert u['completion_tokens'] <= max_tokens, u
 expect = -(-u['prompt_tokens'] * 100000 // 1000000) + -(-u['completion_tokens'] * 400000 // 1000000)

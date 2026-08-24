@@ -1,0 +1,15 @@
+{
+  "alloc_conf": "expandable_segments:True",
+  "arm": "stacked",
+  "concurrency": "64",
+  "cuda_pin": "12.8",
+  "gpu": "NVIDIA RTX A4500",
+  "image": "ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613",
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "model_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+  "note": "post-hoc transcription (2026-08-24) of the FROZEN launch bytes the paid stacked arm executed: scripts/stacked_probe.sh at the paid commit + the worker release live at run time (worker-v0.1.0). Appended to the sealed evidence dir; the paid artifacts themselves are untouched.",
+  "pair_id": "p1787432264",
+  "vllm_canonical_argv": "--revision a09a35458c702b33eeacc393d103063234e8bc28 --tokenizer-revision a09a35458c702b33eeacc393d103063234e8bc28 --seed 0 --max-model-len 8192 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill",
+  "worker_release": "worker-v0.1.0",
+  "worker_sha256": "f9a49dd346f4f5158a3bab401556e20942d7fe941fed02475b6dd3b1d5306327"
+}

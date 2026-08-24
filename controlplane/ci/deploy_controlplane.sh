@@ -39,7 +39,7 @@ read_provider_key() {
 }
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
-CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:${CP_IMAGE_SHA256:-687276b0d37e97e46656077b379eb8f8a671bff360b8a740fa02dffb658ea42e}"
+CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:42cc6195dc1ff6dec4a33689e507db396d2a34e6359ba52aa40d662eb8422f86"
 GW_TAG="gateway-v0.2.0"
 GW_SHA="ca12e53e8729ae97cf4a3c05eef1372ccc0a00be506e470e928ca083789a4abf"
 WORKER_TAG="worker-v0.4.0"
@@ -78,11 +78,11 @@ WORKER_KEY="${WORKER_KEY:-wf-worker-$(rand)}"
 rp() { # method path [json]
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
-    curl -fsS -X "$method" "$API$path" \
+    curl -fsS --connect-timeout 10 --max-time 60 -X "$method" "$API$path" \
       -H "Authorization: Bearer $(read_provider_key)" \
       -H "Content-Type: application/json" -d "$body"
   else
-    curl -fsS -X "$method" "$API$path" \
+    curl -fsS --connect-timeout 10 --max-time 60 -X "$method" "$API$path" \
       -H "Authorization: Bearer $(read_provider_key)"
   fi
 }
@@ -101,48 +101,15 @@ CONCURRENCY="64"
 ALLOC_CONF="expandable_segments:True"
 CUDA_VERSIONS="12.8"
 
-# The engine-contract digest EXACTLY as the gateway derives it
-# (main.rs launch_contract_digest): any replication drift here makes
-# the gateway exit pre-listener with a named reason — the managed CI
-# regression runs this exact env and catches drift at $0.
-ENGINE_DIGEST=$(python3 - "$SERVED_MODEL" "$POD_IMAGE" "$VLLM_EXTRA_ARGS" "$QWEN_REV" "$MAX_CTX" "$CONCURRENCY" "$ALLOC_CONF" "$WORKER_SHA" "$CUDA_VERSIONS" <<'PY'
-import hashlib, sys
-model, image, extra, rev, ctx, conc, alloc, wsha, cuda = sys.argv[1:10]
-canonical = f"{extra.strip()} --revision {rev} --tokenizer-revision {rev} --max-model-len {ctx}"
-contract = (f"model={model}\nimage={image}\npod_args=\nvllm={canonical}"
-            f"\nconcurrency={conc}\nalloc={alloc}\nworker_sha={wsha}\ncuda={cuda}")
-print(hashlib.sha256(contract.encode()).hexdigest())
-PY
-)
-
-# ---------- the measured placement identity (sealed evidence) ----------
-# ONE profile: the stacked A4500 arm of pair p1787432264 — its OWN
-# tps diagnostic (4052.6 tok/s), its OWN boot (202s), the
-# create-proven $0.19/hr community rate.  No 4090 profile: that
-# campaign never completed a registered workload, so it carries no
-# measured identity to sell (codex 0163).
-PROFILES=$(python3 - "$SERVED_MODEL" "$QWEN_REV" "$POD_IMAGE" "$ENGINE_DIGEST" "$MAX_CTX" <<'PY_EOF'
-import json, sys
-model, rev, image, digest, ctx = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-profiles = [{
-    "identity": {"served_model": model, "model_revision": rev,
-                 "tokenizer_revision": rev, "image_digest": image,
-                 "engine_config_digest": digest,
-                 "gpu_sku": "NVIDIA RTX A4500", "cuda_class": "12"},
-    "rate_micro_per_hour": 190_000,
-    "tps_low": 4052, "tps_high": 4053,
-    "tps_evidence": "Measured", "tps_scope": "SingleIdentity",
-    "boot_low_micros": 202_000_000, "boot_high_micros": 202_000_000,
-    "drain_low_micros": 60_000_000, "drain_high_micros": 60_000_000,
-    "fixed_evidence": "Measured", "boot_scope": "SingleIdentity",
-    "observed_at_epoch": 1787440343, "vram_gb": 20,
-    "max_context_tokens": ctx, "catalog_available": True,
-    "recent_acquisition_failures": 0, "cuda_pin": ["12.8"],
-    "source": "pair-p1787432264-stacked",
-}]
-print(json.dumps(profiles))
-PY_EOF
-)
+# NO PLACEMENT PROFILES (codex 0164): the paid pair measured the
+# worker-v0.1.0 identity; production runs worker-v0.4.0 — a DIFFERENT
+# exact identity by the launch-contract digest's own authority.  The
+# first public canary therefore runs the legacy single-pool
+# provisioning path with explicit A4500/CUDA/8192/current-worker
+# launch bytes and the STATIC context authority; its own immutable
+# lifecycle/usage records become the v0.4 identity's first
+# measurement.  The old pair remains Conservative historical evidence
+# only.  profile_evidence_regression.sh enforces all of this.
 
 # ---------- priced customer catalog ----------
 CATALOG='{"revision":"cat-live-1","models":[{"id":"Qwen/Qwen2.5-7B-Instruct","input_price_micro_per_mtok":100000,"output_price_micro_per_mtok":400000,"capabilities":["chat"],"created":1787432264,"context_length":8192}]}'
@@ -155,7 +122,7 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   GW_URL="$GW_URL" GW_SHA="$GW_SHA" WORKER_URL="$WORKER_URL" \
   WORKER_SHA="$WORKER_SHA" POD_IMAGE="$POD_IMAGE" \
   SERVED_MODEL="$SERVED_MODEL" QWEN_REV="$QWEN_REV" CATALOG="$CATALOG" \
-  PROFILES="$PROFILES" VLLM_EXTRA_ARGS="$VLLM_EXTRA_ARGS" \
+  MAX_CTX="$MAX_CTX" VLLM_EXTRA_ARGS="$VLLM_EXTRA_ARGS" \
   CONCURRENCY="$CONCURRENCY" ALLOC_CONF="$ALLOC_CONF" \
   CUDA_VERSIONS="$CUDA_VERSIONS" \
   python3 - <<'PY'
@@ -183,7 +150,9 @@ env = {
     "WEINFER_MODEL_REVISION": e["QWEN_REV"],
     "WEINFER_TOKENIZER_REVISION": e["QWEN_REV"],
     "WEINFER_MODEL_CATALOG": e["CATALOG"],
-    "WEINFER_PLACEMENT_PROFILES": e["PROFILES"],
+    # STATIC context authority (legacy bootstrap path, no profiles):
+    # the catalog may never sell context the engine cannot execute.
+    "WEINFER_BACKEND_MAX_CONTEXT": e["MAX_CTX"],
     "VLLM_EXTRA_ARGS": e["VLLM_EXTRA_ARGS"],
     "WEINFER_CONCURRENCY": e["CONCURRENCY"],
     "PYTORCH_CUDA_ALLOC_CONF": e["ALLOC_CONF"],
@@ -245,7 +214,7 @@ LAUNCH_OK=0
 
 verify_pod_gone() { # pod_id -> 0 iff provider says 404/terminated
   local pod_id="$1" body code
-  body=$(curl -sS -w '\n%{http_code}' "$API/pods/${pod_id}" \
+  body=$(curl -sS --connect-timeout 10 --max-time 30 -w '\n%{http_code}' "$API/pods/${pod_id}" \
     -H "Authorization: Bearer $(read_provider_key)") || return 1
   code="${body##*$'\n'}"
   if [ "$code" = "404" ]; then return 0; fi
@@ -259,7 +228,7 @@ sys.exit(0 if pod.get('desiredStatus') in ('EXITED','TERMINATED') else 1)"
 delete_pod_verified() { # pod_id -> 0 iff deleted AND verified gone
   local pod_id="$1"
   for attempt in 1 2 3; do
-    curl -sS -X DELETE "$API/pods/${pod_id}" \
+    curl -sS --connect-timeout 10 --max-time 30 -X DELETE "$API/pods/${pod_id}" \
       -H "Authorization: Bearer $(read_provider_key)" >/dev/null 2>&1 || true
     sleep 2
     if verify_pod_gone "$pod_id"; then return 0; fi
@@ -270,20 +239,29 @@ delete_pod_verified() { # pod_id -> 0 iff deleted AND verified gone
 
 on_exit() {
   local code=$?
-  [ "$LAUNCH_OK" = "1" ] && exit "$code"
+  if [ "$LAUNCH_OK" = "1" ]; then exit "$code"; fi
+  # errexit would abort this trap on any failing guard — the cleanup
+  # itself must never be skippable.
+  set +e
   echo "LAUNCH FAILED — cleaning up (volume kept as the durable asset)" >&2
   # Resolve the pod id: captured, or discovered by this launch's
   # unique name (the ambiguous-create path).
   if [ -z "$POD_ID" ]; then
-    POD_ID=$(rp GET /pods | python3 -c "
+    # Provider eventual consistency: poll the exact launch name over
+    # a quiescence window before concluding nothing was created.
+    for read in 1 2 3 4 5 6; do
+      FOUND=$(rp GET /pods | python3 -c "
 import json,sys
 pods=json.load(sys.stdin)
 pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
 match=[p for p in pods if p.get('name')=='${CP_NAME}']
 print(match[0]['id'] if match else '')" 2>/dev/null) || {
-      echo "CLEANUP FAILED: could not list pods to resolve the ambiguous create" >&2
-      exit 1
-    }
+        echo "CLEANUP FAILED: could not list pods to resolve the ambiguous create" >&2
+        exit 1
+      }
+      if [ -n "$FOUND" ]; then POD_ID="$FOUND"; break; fi
+      [ "$read" = "6" ] || sleep 10
+    done
   fi
   if [ -n "$POD_ID" ]; then
     delete_pod_verified "$POD_ID" || {
@@ -335,10 +313,10 @@ echo "pod ${POD_ID} created at epoch ${PRE_CREATE_EPOCH}"
 # Rate ceiling: the rate must be PRESENT, positive, and an exactly
 # parsed Decimal at or below the ceiling — absent or malformed rates
 # REFUSE (fail-closed), never default to zero.
-POD_RATE=$(printf '%s' "$POD" | python3 - "$CEILING_CPU_USD_HR" <<'PY_EOF'
+POD_RATE=$(python3 - "$CEILING_CPU_USD_HR" "$POD" <<'PY_EOF'
 import decimal, json, sys
 ceiling = decimal.Decimal(sys.argv[1])
-pod = json.load(sys.stdin)
+pod = json.loads(sys.argv[2])
 raw = pod.get("costPerHr", pod.get("costPerHour"))
 if raw is None:
     sys.exit("rate MISSING from the create response: refusing (fail-closed)")
@@ -358,7 +336,7 @@ echo "rate \$${POD_RATE}/hr within ceiling \$${CEILING_CPU_USD_HR}/hr"
 PUBLIC_BASE="https://${POD_ID}-8080.proxy.runpod.net"
 echo "== waiting for /healthz (deadline ${HEALTH_DEADLINE_SECS}s) =="
 DEADLINE=$(( $(date +%s) + HEALTH_DEADLINE_SECS ))
-until curl -sf "${PUBLIC_BASE}/healthz" >/dev/null 2>&1; do
+until curl -sf --connect-timeout 10 --max-time 15 "${PUBLIC_BASE}/healthz" >/dev/null 2>&1; do
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
     echo "health deadline exceeded" >&2
     exit 1
