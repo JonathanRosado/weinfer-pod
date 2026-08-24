@@ -172,6 +172,7 @@ jobs:
       - name: deploy-tail regression (the destructive path against a v1 fake)
         run: |
           FAKE=ci/fake_runpod_v1.py DEPLOY=ci/deploy_controlplane.sh \
+          RESUME=ci/deploy_cleanup_resume.sh \
             bash controlplane/ci/deploy_tail_regression.sh
       - name: managed drain regression
         run: |
