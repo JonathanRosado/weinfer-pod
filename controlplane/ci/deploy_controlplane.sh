@@ -39,7 +39,7 @@ read_provider_key() {
 }
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
-CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:${CP_IMAGE_SHA256:-REPLACED_AT_SHIP}"
+CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:${CP_IMAGE_SHA256:-687276b0d37e97e46656077b379eb8f8a671bff360b8a740fa02dffb658ea42e}"
 GW_TAG="gateway-v0.2.0"
 GW_SHA="ca12e53e8729ae97cf4a3c05eef1372ccc0a00be506e470e928ca083789a4abf"
 WORKER_TAG="worker-v0.4.0"
@@ -64,7 +64,7 @@ echo "trust roots consistent (gateway ${GW_SHA:0:12}…, worker ${WORKER_SHA:0:1
 
 # ---------- burn ceiling ----------
 CEILING_CPU_USD_HR="0.10"     # refuse any CPU flavor above this
-VOLUME_GB=10                  # ~cents/month; the deliberate durable asset
+VOLUME_GB=10                  # ~$0.70/month at the documented $0.07/GB-mo
 HEALTH_DEADLINE_SECS=900      # /healthz must answer within 15 min or we delete
 
 sha() { python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$1"; }
@@ -87,10 +87,16 @@ rp() { # method path [json]
   fi
 }
 
-# ---------- serving configuration (the SHIPPED stacked arm) ----------
+# ---------- serving configuration: the SEALED STACKED A4500 ARM ----------
+# EXACT production identity = the registered launch bytes of pair
+# p1787432264's stacked arm (codex 0163): same model length, seed,
+# flags, concurrency, allocator, GPU, CUDA pin.  We sell no context
+# beyond the executed bound.  profile_evidence_regression.sh refuses
+# any drift between this block, the sealed evidence, and the probe's
+# registered bytes.
 SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct"
-MAX_CTX=32768
-VLLM_EXTRA_ARGS="--max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill"
+MAX_CTX=8192
+VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill"
 CONCURRENCY="64"
 ALLOC_CONF="expandable_segments:True"
 CUDA_VERSIONS="12.8"
@@ -109,41 +115,37 @@ print(hashlib.sha256(contract.encode()).hexdigest())
 PY
 )
 
-# ---------- measured placement identities (the cost planner's facts) ----------
-# A4500: $0.19/hr create-proven; measured delivered band [24546,35763]
-# micro/Mtok => serving tps [1475,2150]; own-config boot 452s.
-# RTX4090: $0.34/hr; measured serving 3985-4053 tok/s; boot 202-452s
-# across its two paid runs.  Sources: pair p1787432264 + pair 1
-# (progress.md ΔSTACK ledger, 2026-08-22).
-PROFILES=$(python3 - "$SERVED_MODEL" "$QWEN_REV" "$POD_IMAGE" "$ENGINE_DIGEST" "$MAX_CTX" <<'PY'
+# ---------- the measured placement identity (sealed evidence) ----------
+# ONE profile: the stacked A4500 arm of pair p1787432264 — its OWN
+# tps diagnostic (4052.6 tok/s), its OWN boot (202s), the
+# create-proven $0.19/hr community rate.  No 4090 profile: that
+# campaign never completed a registered workload, so it carries no
+# measured identity to sell (codex 0163).
+PROFILES=$(python3 - "$SERVED_MODEL" "$QWEN_REV" "$POD_IMAGE" "$ENGINE_DIGEST" "$MAX_CTX" <<'PY_EOF'
 import json, sys
 model, rev, image, digest, ctx = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-def identity(sku):
-    return {"served_model": model, "model_revision": rev,
-            "tokenizer_revision": rev, "image_digest": image,
-            "engine_config_digest": digest, "gpu_sku": sku, "cuda_class": "12"}
-common = {"drain_low_micros": 60_000_000, "drain_high_micros": 60_000_000,
-          "fixed_evidence": "Measured", "boot_scope": "SingleIdentity",
-          "tps_evidence": "Measured", "tps_scope": "SingleIdentity",
-          "observed_at_epoch": 1787432264, "vram_gb": 20,
-          "max_context_tokens": ctx, "catalog_available": True,
-          "recent_acquisition_failures": 0, "cuda_pin": ["12.8"]}
-profiles = [
-    dict(common, identity=identity("NVIDIA RTX A4500"),
-         rate_micro_per_hour=190_000, tps_low=1475, tps_high=2150,
-         boot_low_micros=452_000_000, boot_high_micros=452_000_000,
-         source="pair-p1787432264-baseline"),
-    dict(common, identity=identity("NVIDIA GeForce RTX 4090"),
-         rate_micro_per_hour=340_000, tps_low=3985, tps_high=4053,
-         boot_low_micros=202_000_000, boot_high_micros=452_000_000,
-         vram_gb=24, source="pair-1-stacked-vs-baseline"),
-]
+profiles = [{
+    "identity": {"served_model": model, "model_revision": rev,
+                 "tokenizer_revision": rev, "image_digest": image,
+                 "engine_config_digest": digest,
+                 "gpu_sku": "NVIDIA RTX A4500", "cuda_class": "12"},
+    "rate_micro_per_hour": 190_000,
+    "tps_low": 4052, "tps_high": 4053,
+    "tps_evidence": "Measured", "tps_scope": "SingleIdentity",
+    "boot_low_micros": 202_000_000, "boot_high_micros": 202_000_000,
+    "drain_low_micros": 60_000_000, "drain_high_micros": 60_000_000,
+    "fixed_evidence": "Measured", "boot_scope": "SingleIdentity",
+    "observed_at_epoch": 1787440343, "vram_gb": 20,
+    "max_context_tokens": ctx, "catalog_available": True,
+    "recent_acquisition_failures": 0, "cuda_pin": ["12.8"],
+    "source": "pair-p1787432264-stacked",
+}]
 print(json.dumps(profiles))
-PY
+PY_EOF
 )
 
 # ---------- priced customer catalog ----------
-CATALOG='{"revision":"cat-live-1","models":[{"id":"Qwen/Qwen2.5-7B-Instruct","input_price_micro_per_mtok":100000,"output_price_micro_per_mtok":400000,"capabilities":["chat"],"created":1787432264,"context_length":32768}]}'
+CATALOG='{"revision":"cat-live-1","models":[{"id":"Qwen/Qwen2.5-7B-Instruct","input_price_micro_per_mtok":100000,"output_price_micro_per_mtok":400000,"capabilities":["chat"],"created":1787432264,"context_length":8192}]}'
 
 # ---------- assemble pod env (argv-passed: no quoting drift) ----------
 ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
@@ -230,14 +232,88 @@ else
   echo "reusing volume $VOL_ID"
 fi
 
-# ---------- create the pod, ceiling enforced in code ----------
-echo "== control-plane pod =="
+# ---------- create the pod: FAIL-CLOSED launch cap (codex 0163) ----------
+# Unique launch identity + EXIT trap installed BEFORE the create side
+# effect.  Any failure after this point deletes the exact pod (found
+# by id, or discovered by this launch's UNIQUE name on an ambiguous
+# create), verifies it is gone, and verifies zero live pods — a
+# verification that cannot run is a FAILURE, never a shrug.
 PRE_CREATE_EPOCH=$(date +%s)
-POD=$(rp POST /pods "$(python3 - "$ENV_JSON" "$CP_IMAGE" "$VOL_ID" <<'PY'
+CP_NAME="weinfer-controlplane-${PRE_CREATE_EPOCH}-$(python3 -c "import secrets;print(secrets.token_hex(4))")"
+POD_ID=""
+LAUNCH_OK=0
+
+verify_pod_gone() { # pod_id -> 0 iff provider says 404/terminated
+  local pod_id="$1" body code
+  body=$(curl -sS -w '\n%{http_code}' "$API/pods/${pod_id}" \
+    -H "Authorization: Bearer $(read_provider_key)") || return 1
+  code="${body##*$'\n'}"
+  if [ "$code" = "404" ]; then return 0; fi
+  [ "$code" = "200" ] || return 1
+  printf '%s' "${body%$'\n'*}" | python3 -c "
+import json,sys
+pod=json.load(sys.stdin)
+sys.exit(0 if pod.get('desiredStatus') in ('EXITED','TERMINATED') else 1)"
+}
+
+delete_pod_verified() { # pod_id -> 0 iff deleted AND verified gone
+  local pod_id="$1"
+  for attempt in 1 2 3; do
+    curl -sS -X DELETE "$API/pods/${pod_id}" \
+      -H "Authorization: Bearer $(read_provider_key)" >/dev/null 2>&1 || true
+    sleep 2
+    if verify_pod_gone "$pod_id"; then return 0; fi
+    sleep $((attempt * 3))
+  done
+  return 1
+}
+
+on_exit() {
+  local code=$?
+  [ "$LAUNCH_OK" = "1" ] && exit "$code"
+  echo "LAUNCH FAILED — cleaning up (volume kept as the durable asset)" >&2
+  # Resolve the pod id: captured, or discovered by this launch's
+  # unique name (the ambiguous-create path).
+  if [ -z "$POD_ID" ]; then
+    POD_ID=$(rp GET /pods | python3 -c "
+import json,sys
+pods=json.load(sys.stdin)
+pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
+match=[p for p in pods if p.get('name')=='${CP_NAME}']
+print(match[0]['id'] if match else '')" 2>/dev/null) || {
+      echo "CLEANUP FAILED: could not list pods to resolve the ambiguous create" >&2
+      exit 1
+    }
+  fi
+  if [ -n "$POD_ID" ]; then
+    delete_pod_verified "$POD_ID" || {
+      echo "CLEANUP FAILED: pod ${POD_ID} could not be verified gone" >&2
+      exit 1
+    }
+    echo "pod ${POD_ID} deleted and verified gone" >&2
+  fi
+  # Zero-live verification, FAIL-CLOSED: an unreadable list is a
+  # failure, never a question mark.
+  LIVE=$(rp GET /pods | python3 -c "
+import json,sys
+pods=json.load(sys.stdin)
+pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
+print(sum(1 for p in pods if p.get('desiredStatus') not in ('EXITED','TERMINATED')))") || {
+    echo "CLEANUP FAILED: zero-live verification could not run" >&2
+    exit 1
+  }
+  echo "zero-live verification: ${LIVE} live pods remain" >&2
+  [ "$LIVE" = "0" ] || { echo "CLEANUP FAILED: live pods remain" >&2; exit 1; }
+  exit 1
+}
+trap on_exit EXIT
+
+echo "== control-plane pod (${CP_NAME}) =="
+CREATE_BODY=$(python3 - "$ENV_JSON" "$CP_IMAGE" "$VOL_ID" "$CP_NAME" <<'PY_EOF'
 import json, sys
-env, image, vol = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3]
+env, image, vol, name = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 print(json.dumps({
-    "name": "weinfer-controlplane",
+    "name": name,
     "imageName": image,
     "computeType": "CPU",
     "cpuFlavorIds": ["cpu3c"],
@@ -248,31 +324,36 @@ print(json.dumps({
     "ports": ["8080/http"],
     "env": env,
 }))
-PY
-)")
+PY_EOF
+)
+# The create call itself: any transport/API/JSON failure lands in the
+# EXIT trap's ambiguous-create discovery.
+POD=$(rp POST /pods "$CREATE_BODY")
 POD_ID=$(printf '%s' "$POD" | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
-POD_RATE=$(printf '%s' "$POD" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('costPerHr', d.get('costPerHour','')))")
-echo "pod ${POD_ID} created at epoch ${PRE_CREATE_EPOCH}, rate \$${POD_RATE:-unknown}/hr"
+echo "pod ${POD_ID} created at epoch ${PRE_CREATE_EPOCH}"
 
-cleanup_pod() {
-  echo "DELETING control-plane pod ${POD_ID} (failure path; volume kept)" >&2
-  rp DELETE "/pods/${POD_ID}" >/dev/null 2>&1 || true
-  LIVE=$(rp GET /pods | python3 -c "
-import json,sys
-pods=json.load(sys.stdin)
-pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
-print(sum(1 for p in pods if p.get('desiredStatus') not in ('EXITED','TERMINATED')))" 2>/dev/null || echo "?")
-  echo "zero-live verification: ${LIVE} live pods remain" >&2
-}
-
-# Rate ceiling: refuse to keep a flavor above the ceiling.
-if [ -n "$POD_RATE" ]; then
-  OVER=$(python3 -c "print(1 if float('$POD_RATE') > float('$CEILING_CPU_USD_HR') else 0)" 2>/dev/null || echo 0)
-  if [ "$OVER" = "1" ]; then
-    echo "rate \$${POD_RATE}/hr exceeds ceiling \$${CEILING_CPU_USD_HR}/hr" >&2
-    cleanup_pod; exit 1
-  fi
-fi
+# Rate ceiling: the rate must be PRESENT, positive, and an exactly
+# parsed Decimal at or below the ceiling — absent or malformed rates
+# REFUSE (fail-closed), never default to zero.
+POD_RATE=$(printf '%s' "$POD" | python3 - "$CEILING_CPU_USD_HR" <<'PY_EOF'
+import decimal, json, sys
+ceiling = decimal.Decimal(sys.argv[1])
+pod = json.load(sys.stdin)
+raw = pod.get("costPerHr", pod.get("costPerHour"))
+if raw is None:
+    sys.exit("rate MISSING from the create response: refusing (fail-closed)")
+try:
+    rate = decimal.Decimal(str(raw))
+except decimal.InvalidOperation:
+    sys.exit(f"rate {raw!r} is not a decimal: refusing (fail-closed)")
+if rate <= 0:
+    sys.exit(f"rate {rate} is not positive: refusing (fail-closed)")
+if rate > ceiling:
+    sys.exit(f"rate {rate}/hr exceeds ceiling {ceiling}/hr: refusing")
+print(rate)
+PY_EOF
+)
+echo "rate \$${POD_RATE}/hr within ceiling \$${CEILING_CPU_USD_HR}/hr"
 
 PUBLIC_BASE="https://${POD_ID}-8080.proxy.runpod.net"
 echo "== waiting for /healthz (deadline ${HEALTH_DEADLINE_SECS}s) =="
@@ -280,10 +361,11 @@ DEADLINE=$(( $(date +%s) + HEALTH_DEADLINE_SECS ))
 until curl -sf "${PUBLIC_BASE}/healthz" >/dev/null 2>&1; do
   if [ "$(date +%s)" -ge "$DEADLINE" ]; then
     echo "health deadline exceeded" >&2
-    cleanup_pod; exit 1
+    exit 1
   fi
   sleep 10
 done
+LAUNCH_OK=1
 
 echo
 echo "CONTROL PLANE LIVE:"
@@ -291,6 +373,6 @@ echo "  public base:  ${PUBLIC_BASE}"
 echo "  pod:          ${POD_ID} (\$${POD_RATE:-?}/hr; ceiling \$${CEILING_CPU_USD_HR}/hr)"
 echo "  volume:       ${VOL_ID} (${VOLUME_GB}GB, durable)"
 echo "  credentials:  ${CRED_FILE}"
-echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + volume ~\$0.07/mo — founder-visible, deliberate"
+echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + volume ~\$0.70/mo — founder-visible, deliberate"
 echo
 echo "next: scripts/canary_traversal.sh ${PUBLIC_BASE} ${CRED_FILE}"

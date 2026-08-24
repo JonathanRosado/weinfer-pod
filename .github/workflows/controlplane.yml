@@ -155,6 +155,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: sealed-evidence regression (the deployment sells what was measured)
+        run: |
+          DEPLOY_SCRIPT=ci/deploy_controlplane.sh \
+          EVIDENCE_FILE=ci/pair_verdict.updated-1787440344.json \
+          PROBE_FILE=ci/stacked_probe.sh \
+            bash controlplane/ci/profile_evidence_regression.sh
       - name: managed drain regression
         run: |
           set -x
@@ -187,10 +193,19 @@ jobs:
             sleep 2
           done
           docker logs mcp 2>&1 | grep -q "derived WEINFER_PUBLIC_BASE=https://fakecp-8080.proxy.runpod.net"
-          # The COMPLETE customer path (same driver as production).
+          # The COMPLETE customer path (same driver as production),
+          # run-scoped: a retry of run ci1 must REPLAY (same job, no
+          # double fund, unchanged reservation); run ci2 must DISPATCH.
           printf 'WEINFER_ADMIN_KEY=ci-admin\n' > creds.env
-          CANARY_EXPECT_COMPLETION=0 bash controlplane/ci/canary_traversal.sh \
-            http://127.0.0.1:8080 creds.env
+          CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=0 \
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+          J1=$(cat /tmp/canary-ci1.job)
+          CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=0 \
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+          [ "$(cat /tmp/canary-ci1.job)" = "$J1" ] || { echo "retry did NOT replay"; exit 1; }
+          CANARY_RUN_ID=ci2 CANARY_EXPECT_COMPLETION=0 \
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+          [ "$(cat /tmp/canary-ci2.job)" != "$J1" ] || { echo "new run did NOT dispatch"; exit 1; }
           # The accepted demand must drive a fake GPU create carrying
           # the derived callback + pinned provenance + cheapest SKU.
           # BootForDeadline fires when remaining <= boot(452s) +
@@ -241,7 +256,7 @@ jobs:
             sleep 2
           done
           ORGS=$(docker exec mcp2 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
-            "SELECT COUNT(*) FROM organizations WHERE org_id='org-canary'")
-          [ "$ORGS" = "1" ] || { echo "canary org did NOT survive"; exit 1; }
+            "SELECT COUNT(*) FROM organizations WHERE org_id IN ('org-canary-ci1','org-canary-ci2')")
+          [ "$ORGS" = "2" ] || { echo "canary orgs did NOT survive (got $ORGS)"; exit 1; }
           docker rm -f mcp2
           echo "MANAGED PASS: serving, priced path, derived callback, pinned provenance, cheapest SKU, one delete, zero resurrection, durable"
