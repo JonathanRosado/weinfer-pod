@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths: ["controlplane/**", ".github/workflows/controlplane.yml"]
   workflow_dispatch:
+    inputs:
+      image_ref:
+        description: "Optional immutable control-plane image ref to verify exactly"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -51,6 +56,18 @@ jobs:
     steps:
       - name: image name (lowercase)
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/weinfer-controlplane" >> "$GITHUB_ENV"
+      - name: select immutable test image
+        env:
+          INPUT_IMAGE: ${{ inputs.image_ref }}
+          BUILD_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          if [ -n "$INPUT_IMAGE" ]; then
+            [[ "$INPUT_IMAGE" =~ ^ghcr\.io/jonathanrosado/weinfer-controlplane@sha256:[0-9a-f]{64}$ ]] \
+              || { echo "image_ref must be the immutable production digest"; exit 1; }
+            echo "TEST_IMAGE=$INPUT_IMAGE" >> "$GITHUB_ENV"
+          else
+            echo "TEST_IMAGE=${IMAGE}@${BUILD_DIGEST}" >> "$GITHUB_ENV"
+          fi
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -69,7 +86,7 @@ jobs:
                   -e WEINFER_API_KEYS="org-smoke:key-smoke:$(printf 'sk-smoke' | sha256sum | awk '{print $1}')"
                   -e WEINFER_BACKEND_URL="http://127.0.0.1:1"
                   -v "$PWD/vol:/vol" -p 8080:8080)
-          docker run -d --name cp1 "${COMMON[@]}" "${IMAGE}:${{ github.sha }}"
+          docker run -d --name cp1 "${COMMON[@]}" "$TEST_IMAGE"
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8080/dashboard >/dev/null 2>&1 && break
             [ "$i" = 60 ] && { docker logs cp1; exit 1; }
@@ -101,7 +118,7 @@ jobs:
           docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -c \
             "INSERT INTO organizations (org_id, name, status, created_at_micros) VALUES ('org-durable', 'Durable', 'active', 1)"
           docker rm -f cp1
-          docker run -d --name cp2 "${COMMON[@]}" "${IMAGE}:${{ github.sha }}"
+          docker run -d --name cp2 "${COMMON[@]}" "$TEST_IMAGE"
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8080/dashboard >/dev/null 2>&1 && break
             [ "$i" = 60 ] && { docker logs cp2; exit 1; }
@@ -128,7 +145,7 @@ jobs:
             -e WEINFER_GATEWAY_SHA256="$GW_SHA" \
             -e WEINFER_PGDATA=/tmp/pgdata \
             -e WEINFER_BACKEND_URL="http://127.0.0.1:1" \
-            "${IMAGE}:${{ github.sha }}" > failclosed.log 2>&1
+            "$TEST_IMAGE" > failclosed.log 2>&1
           CODE=$?
           set -e
           cat failclosed.log
@@ -141,7 +158,7 @@ jobs:
             -e WEINFER_PGDATA=/tmp/pgdata2 \
             -e WEINFER_API_KEYS="o:k:0000000000000000000000000000000000000000000000000000000000000000" \
             -e WEINFER_BACKEND_URL="http://127.0.0.1:1" \
-            "${IMAGE}:${{ github.sha }}" > badsha.log 2>&1
+            "$TEST_IMAGE" > badsha.log 2>&1
           CODE=$?
           set -e
           cat badsha.log
@@ -168,6 +185,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: image name (lowercase)
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/weinfer-controlplane" >> "$GITHUB_ENV"
+      - name: select immutable test image
+        env:
+          INPUT_IMAGE: ${{ inputs.image_ref }}
+          BUILD_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          if [ -n "$INPUT_IMAGE" ]; then
+            [[ "$INPUT_IMAGE" =~ ^ghcr\.io/jonathanrosado/weinfer-controlplane@sha256:[0-9a-f]{64}$ ]] \
+              || { echo "image_ref must be the immutable production digest"; exit 1; }
+            echo "TEST_IMAGE=$INPUT_IMAGE" >> "$GITHUB_ENV"
+          else
+            echo "TEST_IMAGE=${IMAGE}@${BUILD_DIGEST}" >> "$GITHUB_ENV"
+          fi
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -218,7 +247,7 @@ jobs:
           PYEOF
           mkdir -p "$PWD/vol"
           docker run -d --name mcp --network host --env-file env.args \
-            -v "$PWD/vol:/vol" "${IMAGE}:${{ github.sha }}"
+            -v "$PWD/vol:/vol" "$TEST_IMAGE"
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
             [ "$i" = 60 ] && { docker logs mcp; exit 1; }
@@ -367,7 +396,7 @@ jobs:
             -e WEINFER_PGDATA=/vol/pgdata \
             -e WEINFER_API_KEYS="o:k:0000000000000000000000000000000000000000000000000000000000000000" \
             -e WEINFER_BACKEND_URL="http://127.0.0.1:1" \
-            -v "$PWD/vol:/vol" -p 8081:8080 "${IMAGE}:${{ github.sha }}"
+            -v "$PWD/vol:/vol" -p 8081:8080 "$TEST_IMAGE"
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1 && break
             [ "$i" = 60 ] && { docker logs mcp2; exit 1; }
