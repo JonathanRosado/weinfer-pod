@@ -46,12 +46,51 @@ echo "[entrypoint] gateway binary verified"
 mkdir -p "$PGDATA_DIR"
 chown -R postgres:postgres "$PGDATA_DIR"
 chmod 700 "$PGDATA_DIR"
+# CI forces the live RunPod mount behavior: the provider filesystem
+# reports uniform 0777 even after chmod succeeds. This flag is never
+# present in production; it makes the zero-GPU container gate execute
+# the same compatibility branch the real mount selects naturally.
+if [ "${WEINFER_TEST_PGDATA_WORLD_MODE:-0}" = "1" ]; then
+  chmod 777 "$PGDATA_DIR"
+fi
+
+PGDATA_MODE=$(stat -c '%a' "$PGDATA_DIR")
+PGDATA_OWNER=$(stat -c '%u:%g' "$PGDATA_DIR")
+PG_PRELOAD=()
+case "$PGDATA_MODE" in
+  700|750)
+    echo "[entrypoint] pgdata permissions ${PGDATA_MODE} (${PGDATA_OWNER}) accepted natively"
+    ;;
+  *)
+    # RunPod Network Volumes report uniform permission bits even when
+    # chmod returns success. PostgreSQL refuses that mount before it
+    # can initialize. Load the exact-path stat shim ONLY into
+    # initdb/postgres; all bytes still go directly to the durable
+    # volume and the gateway never loads the shim.
+    PG_PRELOAD=(env
+      LD_PRELOAD=/usr/local/lib/weinfer-pgdata-mode.so
+      WEINFER_PGDATA="$PGDATA_DIR")
+    echo "[entrypoint] pgdata permissions ${PGDATA_MODE} (${PGDATA_OWNER}); exact-path compatibility shim active"
+    ;;
+esac
+POSTGRES_UID=$(id -u postgres)
+POSTGRES_GID=$(id -g postgres)
+PGDATA_PROCESS_VIEW=$(gosu postgres "${PG_PRELOAD[@]}" stat -c '%a:%u:%g' "$PGDATA_DIR")
+case "$PGDATA_PROCESS_VIEW" in
+  700:"${POSTGRES_UID}":"${POSTGRES_GID}"|750:"${POSTGRES_UID}":"${POSTGRES_GID}") ;;
+  *)
+    echo "[entrypoint] pgdata compatibility preflight failed: postgres sees ${PGDATA_PROCESS_VIEW}" >&2
+    exit 1
+    ;;
+esac
+echo "[entrypoint] postgres pgdata view ${PGDATA_PROCESS_VIEW} accepted"
 if [ ! -s "$PGDATA_DIR/PG_VERSION" ]; then
   echo "[entrypoint] initializing Postgres data dir at ${PGDATA_DIR}"
-  gosu postgres initdb -D "$PGDATA_DIR" --auth=trust >/dev/null
+  gosu postgres "${PG_PRELOAD[@]}" initdb -D "$PGDATA_DIR" --auth=trust >/dev/null
 fi
 echo "[entrypoint] starting Postgres (loopback only)"
-gosu postgres postgres -D "$PGDATA_DIR" -c listen_addresses=127.0.0.1 -c port=5432 &
+gosu postgres "${PG_PRELOAD[@]}" postgres -D "$PGDATA_DIR" \
+  -c listen_addresses=127.0.0.1 -c port=5432 &
 PG_PID=$!
 
 for i in $(seq 1 60); do

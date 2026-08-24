@@ -65,6 +65,7 @@ jobs:
           COMMON=(-e WEINFER_GATEWAY_URL="$GW_URL"
                   -e WEINFER_GATEWAY_SHA256="$GW_SHA"
                   -e WEINFER_PGDATA=/vol/pgdata
+                  -e WEINFER_TEST_PGDATA_WORLD_MODE=1
                   -e WEINFER_API_KEYS="org-smoke:key-smoke:$(printf 'sk-smoke' | sha256sum | awk '{print $1}')"
                   -e WEINFER_BACKEND_URL="http://127.0.0.1:1"
                   -v "$PWD/vol:/vol" -p 8080:8080)
@@ -75,6 +76,18 @@ jobs:
             sleep 2
           done
           docker logs cp1 2>&1 | grep -q "gateway binary verified"
+          docker logs cp1 2>&1 | grep -q "pgdata permissions 777 .*exact-path compatibility shim active"
+          docker logs cp1 2>&1 | grep -Eq "postgres pgdata view (700|750):[0-9]+:[0-9]+ accepted"
+          # The preload lie is path-scoped: the PGDATA directory is
+          # masked to 0700 for Postgres, while an unrelated 0777
+          # directory remains visibly 0777 under the SAME process env.
+          docker exec cp1 mkdir -p /vol/unrelated
+          docker exec cp1 chmod 777 /vol/unrelated
+          VIEWS=$(docker exec cp1 gosu postgres env \
+            LD_PRELOAD=/usr/local/lib/weinfer-pgdata-mode.so \
+            WEINFER_PGDATA=/vol/pgdata sh -c \
+            "stat -c %a /vol/pgdata; stat -c %a /vol/unrelated")
+          [ "$VIEWS" = $'700\n777' ] || { echo "shim escaped exact path: $VIEWS"; exit 1; }
           # ALL migrations applied by the gateway itself — the same
           # binary and path production uses.
           MIGS=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
@@ -194,6 +207,7 @@ jobs:
           env.update({
               "WEINFER_RUNPOD_BASE": "http://127.0.0.1:18990",
               "WEINFER_PGDATA": "/vol/pgdata",
+              "WEINFER_TEST_PGDATA_WORLD_MODE": "1",
               "WEINFER_PROBE_BUDGET": "60",
               "WEINFER_PROBE_DELAY_SECS": "10",
               "RUNPOD_POD_ID": "fakecp",
