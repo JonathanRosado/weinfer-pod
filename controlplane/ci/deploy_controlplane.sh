@@ -127,7 +127,7 @@ common = {"drain_low_micros": 60_000_000, "drain_high_micros": 60_000_000,
           "tps_evidence": "Measured", "tps_scope": "SingleIdentity",
           "observed_at_epoch": 1787432264, "vram_gb": 20,
           "max_context_tokens": ctx, "catalog_available": True,
-          "recent_acquisition_failures": 0}
+          "recent_acquisition_failures": 0, "cuda_pin": ["12.8"]}
 profiles = [
     dict(common, identity=identity("NVIDIA RTX A4500"),
          rate_micro_per_hour=190_000, tps_low=1475, tps_high=2150,
