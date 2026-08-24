@@ -115,6 +115,15 @@ static void mask_stat64(struct stat64 *buffer) {
     buffer->st_gid = getegid();
 }
 
+static void mask_statx(struct statx *buffer) {
+    if (buffer == NULL || (buffer->stx_mode & S_IFMT) != S_IFDIR) {
+        return;
+    }
+    buffer->stx_mode = (buffer->stx_mode & ~(unsigned short)0777) | (unsigned short)0700;
+    buffer->stx_uid = geteuid();
+    buffer->stx_gid = getegid();
+}
+
 #define RESOLVE(symbol, type)                                                                    \
     static type real_##symbol = NULL;                                                            \
     if (real_##symbol == NULL) {                                                                 \
@@ -200,6 +209,16 @@ int fstatat64(int dirfd, const char *path, struct stat64 *buffer, int flags) {
     const int result = real_fstatat64(dirfd, path, buffer, flags);
     if (result == 0 && at_path_is_pgdata(dirfd, path)) {
         mask_stat64(buffer);
+    }
+    return result;
+}
+
+int statx(int dirfd, const char *path, int flags, unsigned int mask, struct statx *buffer) {
+    typedef int (*function_type)(int, const char *, int, unsigned int, struct statx *);
+    RESOLVE(statx, function_type);
+    const int result = real_statx(dirfd, path, flags, mask, buffer);
+    if (result == 0 && at_path_is_pgdata(dirfd, path)) {
+        mask_statx(buffer);
     }
     return result;
 }
