@@ -85,15 +85,67 @@ CUSTOMER_KEY="${CUSTOMER_KEY:-wf-live-$(rand)}"
 WORKER_KEY="${WORKER_KEY:-wf-worker-$(rand)}"
 
 rp() { # method path [json]
-  local method="$1" path="$2" body="${3:-}"
+  local method="$1" path="$2" body="${3:-}" tmp code rc detail secret provider_secret
+  tmp=$(mktemp "${TMPDIR:-/tmp}/weinfer-runpod-response.XXXXXX")
   if [ -n "$body" ]; then
-    curl -fsS --connect-timeout 10 --max-time 60 -X "$method" "$API$path" \
+    set +e
+    code=$(curl -sS --connect-timeout 10 --max-time 60 --max-filesize 1048576 \
+      -o "$tmp" -w '%{http_code}' -X "$method" "$API$path" \
       -H "Authorization: Bearer $(read_provider_key)" \
-      -H "Content-Type: application/json" -d "$body"
+      -H "Content-Type: application/json" -d "$body")
+    rc=$?
+    set -e
   else
-    curl -fsS --connect-timeout 10 --max-time 60 -X "$method" "$API$path" \
-      -H "Authorization: Bearer $(read_provider_key)"
+    set +e
+    code=$(curl -sS --connect-timeout 10 --max-time 60 --max-filesize 1048576 \
+      -o "$tmp" -w '%{http_code}' -X "$method" "$API$path" \
+      -H "Authorization: Bearer $(read_provider_key)")
+    rc=$?
+    set -e
   fi
+  if [ "$rc" != "0" ]; then
+    rm -f "$tmp"
+    echo "RunPod ${method} ${path} transport failure (curl ${rc})" >&2
+    return "$rc"
+  fi
+  case "$code" in
+    2??) cat "$tmp"; rm -f "$tmp"; return 0 ;;
+  esac
+  # Extract only a bounded provider-authored error string. Never emit
+  # the response object itself: a provider could reflect the create
+  # body, which contains live launch credentials.
+  detail=$(python3 - "$tmp" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1]))
+except Exception:
+    value = None
+detail = None
+if isinstance(value, dict):
+    for key in ("error", "message", "detail"):
+        candidate = value.get(key)
+        if isinstance(candidate, str):
+            detail = candidate
+            break
+        if isinstance(candidate, dict):
+            for nested in ("message", "detail", "code"):
+                if isinstance(candidate.get(nested), str):
+                    detail = candidate[nested]
+                    break
+        if detail:
+            break
+if not detail:
+    detail = "response detail unavailable"
+print(" ".join(detail.split())[:160])
+PY
+)
+  provider_secret=$(read_provider_key)
+  for secret in "$ADMIN_KEY" "$CUSTOMER_KEY" "$WORKER_KEY" "$provider_secret"; do
+    if [ -n "$secret" ]; then detail="${detail//$secret/[redacted]}"; fi
+  done
+  rm -f "$tmp"
+  echo "RunPod ${method} ${path} HTTP ${code}: ${detail}" >&2
+  return 22
 }
 
 # ---------- serving configuration: the SEALED STACKED A4500 ARM ----------
