@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.1.0
+  GATEWAY_TAG: gateway-v0.2.0
 
 jobs:
   build:
@@ -134,3 +134,111 @@ jobs:
           [ "$CODE" != "0" ]
           grep -q "sha256 mismatch" badsha.log
           echo "FAIL-CLOSED PASS: missing keys and bad pin both refuse"
+
+  # MANAGED regression (codex 0162): the EXACT deploy env — rendered
+  # by the deploy script itself — through the real gateway against a
+  # zero-spend fake provider.  Proves: serving reached, the priced
+  # catalog is live, the customer path accepts + reserves, the fake
+  # GPU create body carries the DERIVED public callback + pinned
+  # worker provenance + the cost planner's cheapest measured SKU, and
+  # `docker stop` (SIGTERM) drives the full drain: exactly one
+  # provider delete, zero resurrection, durable database.
+  managed:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: image name (lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/weinfer-controlplane" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: managed drain regression
+        run: |
+          set -x
+          python3 controlplane/ci/fake_runpod.py 18990 &
+          sleep 1
+          # The EXACT deploy env, from the deploy script's own assembly.
+          ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+            bash controlplane/ci/deploy_controlplane.sh --render-env > env.json
+          python3 - <<'PYEOF'
+          import json
+          env = json.load(open("env.json"))
+          # CI-only overrides: fake provider, fast probes, local pgdata.
+          env.update({
+              "WEINFER_RUNPOD_BASE": "http://127.0.0.1:18990",
+              "WEINFER_PGDATA": "/vol/pgdata",
+              "WEINFER_PROBE_BUDGET": "60",
+              "WEINFER_PROBE_DELAY_SECS": "10",
+              "RUNPOD_POD_ID": "fakecp",
+          })
+          with open("env.args", "w") as f:
+              for k, v in env.items():
+                  f.write(f"{k}={v}\n")
+          PYEOF
+          mkdir -p "$PWD/vol"
+          docker run -d --name mcp --network host --env-file env.args \
+            -v "$PWD/vol:/vol" "${IMAGE}:${{ github.sha }}"
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { docker logs mcp; exit 1; }
+            sleep 2
+          done
+          docker logs mcp 2>&1 | grep -q "derived WEINFER_PUBLIC_BASE=https://fakecp-8080.proxy.runpod.net"
+          # The COMPLETE customer path (same driver as production).
+          printf 'WEINFER_ADMIN_KEY=ci-admin\n' > creds.env
+          CANARY_EXPECT_COMPLETION=0 bash controlplane/ci/canary_traversal.sh \
+            http://127.0.0.1:8080 creds.env
+          # The accepted demand must drive a fake GPU create carrying
+          # the derived callback + pinned provenance + cheapest SKU.
+          for i in $(seq 1 90); do
+            [ -s /tmp/fake-runpod-bodies.jsonl ] && break
+            [ "$i" = 90 ] && { echo "no provider create fired"; docker logs mcp | tail -50; exit 1; }
+            sleep 2
+          done
+          python3 - <<'PYEOF'
+          import json
+          body = json.loads(open("/tmp/fake-runpod-bodies.jsonl").readline())
+          env = body["env"]
+          assert env["WEINFER_GATEWAY_BASE"] == "https://fakecp-8080.proxy.runpod.net", env["WEINFER_GATEWAY_BASE"]
+          assert env["WEINFER_WORKER_SHA256"] == "7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
+          assert "worker-v0.4.0" in env["WEINFER_WORKER_URL"]
+          assert body["image"].startswith("ghcr.io/jonathanrosado/weinfer-pod@sha256:160a9268")
+          assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
+          print("CREATE BODY PROVEN: derived callback + pinned provenance + cheapest measured SKU")
+          PYEOF
+          CREATES_BEFORE=$(wc -l < /tmp/fake-runpod-bodies.jsonl)
+          : > /tmp/fake-runpod-deletes.log || true
+          # SIGTERM drain: docker stop must terminate the held pod.
+          docker stop -t 120 mcp
+          [ "$(docker inspect mcp --format '{{.State.ExitCode}}')" = "0" ] || { docker logs mcp | tail -30; exit 1; }
+          docker logs mcp 2>&1 | grep -q "shutdown: settling held pod"
+          DELETES=$(wc -l < /tmp/fake-runpod-deletes.log)
+          [ "$DELETES" = "1" ] || { echo "expected exactly 1 provider delete, got $DELETES"; exit 1; }
+          sleep 10
+          CREATES_AFTER=$(wc -l < /tmp/fake-runpod-bodies.jsonl)
+          [ "$CREATES_AFTER" = "$CREATES_BEFORE" ] || { echo "RESURRECTION: creates after stop"; exit 1; }
+          # Durable database: a fresh UNMANAGED container on the same
+          # volume still holds the canary org and its ledger rows.
+          docker rm mcp
+          GW_URL="https://github.com/${{ github.repository }}/releases/download/${GATEWAY_TAG}/weinfer-gateway"
+          GW_SHA="$(curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GATEWAY_TAG}/weinfer-gateway.sha256" | awk '{print $1}')"
+          docker run -d --name mcp2 \
+            -e WEINFER_GATEWAY_URL="$GW_URL" \
+            -e WEINFER_GATEWAY_SHA256="$GW_SHA" \
+            -e WEINFER_PGDATA=/vol/pgdata \
+            -e WEINFER_API_KEYS="o:k:0000000000000000000000000000000000000000000000000000000000000000" \
+            -e WEINFER_BACKEND_URL="http://127.0.0.1:1" \
+            -v "$PWD/vol:/vol" -p 8081:8080 "${IMAGE}:${{ github.sha }}"
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { docker logs mcp2; exit 1; }
+            sleep 2
+          done
+          ORGS=$(docker exec mcp2 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT COUNT(*) FROM organizations WHERE org_id='org-canary'")
+          [ "$ORGS" = "1" ] || { echo "canary org did NOT survive"; exit 1; }
+          docker rm -f mcp2
+          echo "MANAGED PASS: serving, priced path, derived callback, pinned provenance, cheapest SKU, one delete, zero resurrection, durable"

@@ -20,6 +20,15 @@ set -euo pipefail
 : "${WEINFER_GATEWAY_SHA256:?WEINFER_GATEWAY_SHA256 is required}"
 PGDATA_DIR="${WEINFER_PGDATA:-/workspace/pgdata}"
 
+# The public callback base is DERIVED from the provider's own pod
+# identity (codex 0162): RunPod injects RUNPOD_POD_ID, and the proxy
+# URL is a pure function of it — no operator-supplied value to drift.
+# An explicit WEINFER_PUBLIC_BASE still wins (CI, non-RunPod hosts).
+if [ -z "${WEINFER_PUBLIC_BASE:-}" ] && [ -n "${RUNPOD_POD_ID:-}" ]; then
+  export WEINFER_PUBLIC_BASE="https://${RUNPOD_POD_ID}-8080.proxy.runpod.net"
+  echo "[entrypoint] derived WEINFER_PUBLIC_BASE=${WEINFER_PUBLIC_BASE}"
+fi
+
 echo "[entrypoint] fetching gateway binary from ${WEINFER_GATEWAY_URL}"
 curl -fsSL --retry 5 --retry-delay 5 -o /usr/local/bin/weinfer-gateway \
   "$WEINFER_GATEWAY_URL"
