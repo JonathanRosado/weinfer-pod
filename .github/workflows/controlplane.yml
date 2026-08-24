@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.4.0
+  GATEWAY_TAG: gateway-v0.5.0
   WORKER_TAG: worker-v0.4.0
 
 jobs:
@@ -172,6 +172,7 @@ jobs:
       - name: deploy-tail regression (the destructive path against a v1 fake)
         run: |
           FAKE=ci/fake_runpod_v1.py DEPLOY=ci/deploy_controlplane.sh \
+          RESUME=ci/deploy_cleanup_resume.sh \
             bash controlplane/ci/deploy_tail_regression.sh
       - name: managed drain regression
         run: |
@@ -217,11 +218,19 @@ jobs:
               http://127.0.0.1:8080/admin/organizations/org-conc/credits \
               -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" \
               -d '{"grant_id":"g-conc-1","amount_micro_usd":2000000,"memo":"conc"}' \
-              -o /dev/null & CURL_PIDS="$CURL_PIDS $!"
+              -o /dev/null -w '%{http_code}' > "/tmp/conc-$i.code" & CURL_PIDS="$CURL_PIDS $!"
           done
           # wait ONLY the curls: a bare `wait` also waits on the
           # forever-running fake provider (the 75-minute hang).
           wait $CURL_PIDS
+          # BOTH must be HTTP 200 (exact-idempotent replay), and the
+          # ledger must hold exactly ONE grant row — asserted in SQL,
+          # not only through the balance total (codex 0166).
+          [ "$(cat /tmp/conc-1.code)" = "200" ] || { echo "grant 1 not 200: $(cat /tmp/conc-1.code)"; exit 1; }
+          [ "$(cat /tmp/conc-2.code)" = "200" ] || { echo "grant 2 not 200: $(cat /tmp/conc-2.code)"; exit 1; }
+          ROWS=$(docker exec mcp gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT COUNT(*) FROM credit_grants WHERE grant_id='g-conc-1'")
+          [ "$ROWS" = "1" ] || { echo "expected exactly one grant row, got $ROWS"; exit 1; }
           CONC_KEY=$(curl -fsS -X POST http://127.0.0.1:8080/admin/organizations/org-conc/keys \
             -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" -d '{}' \
             | python3 -c "import json,sys;print(json.load(sys.stdin)['raw_key'])")
@@ -325,4 +334,4 @@ jobs:
             "SELECT COUNT(*) FROM organizations WHERE org_id IN ('org-canary-ci1','org-canary-ci2')")
           [ "$ORGS" = "2" ] || { echo "canary orgs did NOT survive (got $ORGS)"; exit 1; }
           docker rm -f mcp2
-          echo "MANAGED PASS: serving, priced path, derived callback, pinned provenance, cheapest SKU, one delete, zero resurrection, durable"
+          echo "MANAGED PASS: serving, priced path, derived callback, pinned provenance, spec-pinned A4500 bootstrap, one delete, zero resurrection, durable"

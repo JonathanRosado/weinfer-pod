@@ -168,17 +168,23 @@ if [ "$EXPECT_COMPLETION" = "1" ]; then
     sleep 10
   done
   say "8/8 frozen-rate charge, hold release, balance conservation"
+  # ONE predicate (codex 0166): the live answer goes through the
+  # SAME self-mutation-tested answer_ok used above — the acceptance
+  # rule cannot drift from its own test.
+  CONTENT=$(python3 - "$S" <<'PY'
+import json, sys
+print(json.loads(sys.argv[1])['response']['choices'][0]['message']['content'])
+PY
+)
+  answer_ok "$CONTENT" || {
+    echo "task answer is not exactly canary-ok: ${CONTENT}" >&2
+    exit 1
+  }
   python3 - "$MAX_TOKENS" "$S" <<'PY'
 import json, sys
 max_tokens = int(sys.argv[1])
 s = json.loads(sys.argv[2])
 assert s['reconciliation'] == 'billed', s
-# A wrong answer is NOT a successful task: the model was told to
-# reply exactly canary-ok, and EXACTLY canary-ok (whitespace
-# stripped) is the only accepted answer (codex 0165).
-content = s['response']['choices'][0]['message']['content']
-assert content.strip() == 'canary-ok', (
-    'model output is not exactly canary-ok', content)
 u, c = s['usage'], s['charge']
 assert u['completion_tokens'] <= max_tokens, u
 expect = -(-u['prompt_tokens'] * 100000 // 1000000) + -(-u['completion_tokens'] * 400000 // 1000000)

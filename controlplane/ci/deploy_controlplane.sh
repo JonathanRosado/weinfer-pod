@@ -49,8 +49,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:dc119010d53655502abfc554f0b047942973a1e18877c4a3f6c26a112e1d3481"
-GW_TAG="gateway-v0.4.0"
-GW_SHA="bf5b9cb846d07d77b848a3c49993b03305680e36e4e73532ea7dbdb3ac94e412"
+GW_TAG="gateway-v0.5.0"
+GW_SHA="9fba791aa8600908420a8ef1df4b394dc4b2583a49c4a3db81a691c495014a80"
 WORKER_TAG="worker-v0.4.0"
 WORKER_SHA="7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -259,6 +259,20 @@ delete_pod_verified() { # pod_id -> 0 iff deleted AND verified gone
   return 1
 }
 
+# The resource may be LIVE and the provider unreadable: persist an
+# independently executable cleanup state and NEVER claim clean
+# (codex 0166: a loud failure is not a spend ceiling).
+persist_unresolved() {
+  local why="$1"
+  local state_file="${HOME}/.weinfer/unresolved-launch-${CP_NAME}.json"
+  mkdir -p "$(dirname "$state_file")"
+  printf '{"name":"%s","api":"%s","epoch":%s,"pod_id":"%s"}\n' \
+    "$CP_NAME" "$API" "$PRE_CREATE_EPOCH" "${POD_ID:-}" > "$state_file"
+  echo "CLEANUP UNRESOLVED: ${why}; the pod may be LIVE and billing" >&2
+  echo "state persisted: ${state_file}" >&2
+  echo "finish with: scripts/deploy_cleanup_resume.sh ${state_file}" >&2
+}
+
 on_exit() {
   local code=$?
   if [ "$LAUNCH_OK" = "1" ]; then exit "$code"; fi
@@ -269,25 +283,36 @@ on_exit() {
   # Resolve the pod id: captured, or discovered by this launch's
   # unique name (the ambiguous-create path).
   if [ -z "$POD_ID" ]; then
-    # Provider eventual consistency: poll the exact launch name over
-    # a quiescence window before concluding nothing was created.
-    for read in 1 2 3 4 5 6; do
-      FOUND=$(rp GET /pods | python3 -c "
+    # Provider eventual consistency + OUTAGE RECOVERY (codex 0166): a
+    # list failure retries loudly and VOIDS the quiescence count —
+    # only successful EMPTY reads count toward "nothing was created".
+    EMPTY_READS=0
+    ATTEMPTS=0
+    while [ "$EMPTY_READS" -lt 6 ] && [ "$ATTEMPTS" -lt 30 ]; do
+      ATTEMPTS=$((ATTEMPTS + 1))
+      if LISTING=$(rp GET /pods 2>/dev/null); then
+        FOUND=$(printf '%s' "$LISTING" | python3 -c "
 import json,sys
 pods=json.load(sys.stdin)
 pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
 match=[p for p in pods if p.get('name')=='${CP_NAME}']
-print(match[0]['id'] if match else '')" 2>/dev/null) || {
-        echo "CLEANUP FAILED: could not list pods to resolve the ambiguous create" >&2
-        exit 1
-      }
-      if [ -n "$FOUND" ]; then POD_ID="$FOUND"; break; fi
-      [ "$read" = "6" ] || sleep 10
+print(match[0]['id'] if match else '')" 2>/dev/null)
+        if [ -n "$FOUND" ]; then POD_ID="$FOUND"; break; fi
+        EMPTY_READS=$((EMPTY_READS + 1))
+      else
+        echo "cleanup: provider list FAILED (attempt ${ATTEMPTS}) — retrying, outage voids quiescence" >&2
+        EMPTY_READS=0
+      fi
+      sleep 5
     done
+    if [ -z "$POD_ID" ] && [ "$EMPTY_READS" -lt 6 ]; then
+      persist_unresolved "provider listing never recovered during ambiguous-create discovery"
+      exit 1
+    fi
   fi
   if [ -n "$POD_ID" ]; then
     delete_pod_verified "$POD_ID" || {
-      echo "CLEANUP FAILED: pod ${POD_ID} could not be verified gone" >&2
+      persist_unresolved "pod ${POD_ID} could not be verified gone"
       exit 1
     }
     echo "pod ${POD_ID} deleted and verified gone" >&2
@@ -299,7 +324,7 @@ import json,sys
 pods=json.load(sys.stdin)
 pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
 print(sum(1 for p in pods if (p.get('status') or p.get('desiredStatus')) != 'TERMINATED'))") || {
-    echo "CLEANUP FAILED: zero-live verification could not run" >&2
+    persist_unresolved "zero-live verification could not run"
     exit 1
   }
   echo "zero-live verification: ${LIVE} live pods remain" >&2
