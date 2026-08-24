@@ -153,6 +153,12 @@ env = {
     # STATIC context authority (legacy bootstrap path, no profiles):
     # the catalog may never sell context the engine cannot execute.
     "WEINFER_BACKEND_MAX_CONTEXT": e["MAX_CTX"],
+    # Aggregation release margin: the default 2s models only the
+    # worker poll gap, so an underfilled batch releases at the razor
+    # edge of its deadline and can EXPIRE at grant time (observed in
+    # the CI worker e2e: one job released at deadline-2s and missed).
+    # 30s covers poll cadence + grant latency honestly.
+    "WEINFER_POLL_MARGIN_SECS": "30",
     "VLLM_EXTRA_ARGS": e["VLLM_EXTRA_ARGS"],
     "WEINFER_CONCURRENCY": e["CONCURRENCY"],
     "PYTORCH_CUDA_ALLOC_CONF": e["ALLOC_CONF"],

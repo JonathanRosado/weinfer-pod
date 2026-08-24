@@ -249,11 +249,13 @@ jobs:
           # Retry of ci1: replays the COMPLETED state (settled ledger,
           # conservation) without minting a key or double-funding.
           CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
-            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env \
+            || { tail -30 worker.log; docker logs mcp 2>&1 | tail -30; exit 1; }
           [ "$(cat /tmp/canary-ci1.job)" = "$J1" ] || { echo "retry did NOT replay"; exit 1; }
           # A NEW run id completes a DISTINCT engine call end to end.
           CANARY_RUN_ID=ci2 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
-            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env
+            bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env \
+            || { tail -30 worker.log; docker logs mcp 2>&1 | tail -30; exit 1; }
           [ "$(cat /tmp/canary-ci2.job)" != "$J1" ] || { echo "new run did NOT dispatch"; exit 1; }
           CALLS=$(wc -l < /tmp/fake-engine-requests.jsonl)
           [ "$CALLS" -ge 2 ] || { echo "expected >=2 distinct engine calls, got $CALLS"; exit 1; }
