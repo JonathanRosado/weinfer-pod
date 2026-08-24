@@ -1,0 +1,135 @@
+name: controlplane-build-and-smoke
+
+on:
+  push:
+    branches: [main]
+    paths: ["controlplane/**", ".github/workflows/controlplane.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GATEWAY_TAG: gateway-v0.1.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: image name (lowercase; registries reject uppercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/weinfer-controlplane" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: push
+        with:
+          context: controlplane
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+      - name: print pinned reference
+        run: echo "IMMUTABLE: ${IMAGE}@${{ steps.push.outputs.digest }}"
+
+  # Zero-GPU, zero-provider smoke: the container brings up durable
+  # Postgres, fetches and sha-verifies the REAL released gateway, the
+  # gateway applies ALL migrations and serves the public surface; the
+  # database SURVIVES container replacement; and the container fails
+  # closed when required configuration is missing.
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: image name (lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/weinfer-controlplane" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: boot, migrate, serve
+        run: |
+          set -x
+          GW_URL="https://github.com/${{ github.repository }}/releases/download/${GATEWAY_TAG}/weinfer-gateway"
+          GW_SHA="$(curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GATEWAY_TAG}/weinfer-gateway.sha256" | awk '{print $1}')"
+          mkdir -p "$PWD/vol"
+          COMMON=(-e WEINFER_GATEWAY_URL="$GW_URL"
+                  -e WEINFER_GATEWAY_SHA256="$GW_SHA"
+                  -e WEINFER_PGDATA=/vol/pgdata
+                  -e WEINFER_API_KEYS="org-smoke:key-smoke:$(printf 'sk-smoke' | sha256sum | awk '{print $1}')"
+                  -e WEINFER_BACKEND_URL="http://127.0.0.1:1"
+                  -v "$PWD/vol:/vol" -p 8080:8080)
+          docker run -d --name cp1 "${COMMON[@]}" "${IMAGE}:${{ github.sha }}"
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8080/dashboard >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { docker logs cp1; exit 1; }
+            sleep 2
+          done
+          docker logs cp1 2>&1 | grep -q "gateway binary verified"
+          # ALL migrations applied by the gateway itself — the same
+          # binary and path production uses.
+          MIGS=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
+          [ "$MIGS" -ge 38 ] || { echo "only $MIGS migrations applied"; exit 1; }
+          # Both billing constraints are VALIDATED on the production path.
+          VALIDATED=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT COUNT(*) FROM pg_constraint WHERE conname IN ('quoted_money_shape','billed_tokens_travel_together') AND convalidated")
+          [ "$VALIDATED" = "2" ] || { echo "constraints not validated"; exit 1; }
+          # Durability marker, then REPLACE the container entirely.
+          docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -c \
+            "INSERT INTO organizations (org_id, name, status, created_at_micros) VALUES ('org-durable', 'Durable', 'active', 1)"
+          docker rm -f cp1
+          docker run -d --name cp2 "${COMMON[@]}" "${IMAGE}:${{ github.sha }}"
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8080/dashboard >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { docker logs cp2; exit 1; }
+            sleep 2
+          done
+          SURVIVED=$(docker exec cp2 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT COUNT(*) FROM organizations WHERE org_id='org-durable'")
+          [ "$SURVIVED" = "1" ] || { echo "database did NOT survive replacement"; exit 1; }
+          # The public auth boundary is live: bad key 401, good key 200.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' http://127.0.0.1:8080/v1/usage)" = "401" ]
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer sk-smoke' http://127.0.0.1:8080/v1/usage)" = "200" ]
+          docker rm -f cp2
+          echo "SMOKE PASS: boot, verify, migrate(validated), serve, durable, auth"
+      - name: fail closed without required configuration
+        run: |
+          set -x
+          GW_URL="https://github.com/${{ github.repository }}/releases/download/${GATEWAY_TAG}/weinfer-gateway"
+          GW_SHA="$(curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${GATEWAY_TAG}/weinfer-gateway.sha256" | awk '{print $1}')"
+          # Missing WEINFER_API_KEYS: the gateway must refuse to serve
+          # and the container must exit nonzero.
+          set +e
+          docker run --rm --name cpx \
+            -e WEINFER_GATEWAY_URL="$GW_URL" \
+            -e WEINFER_GATEWAY_SHA256="$GW_SHA" \
+            -e WEINFER_PGDATA=/tmp/pgdata \
+            -e WEINFER_BACKEND_URL="http://127.0.0.1:1" \
+            "${IMAGE}:${{ github.sha }}" > failclosed.log 2>&1
+          CODE=$?
+          set -e
+          cat failclosed.log
+          [ "$CODE" != "0" ] || { echo "container did NOT fail closed"; exit 1; }
+          # A wrong sha256 pin must refuse the binary entirely.
+          set +e
+          docker run --rm \
+            -e WEINFER_GATEWAY_URL="$GW_URL" \
+            -e WEINFER_GATEWAY_SHA256="deadbeef" \
+            -e WEINFER_PGDATA=/tmp/pgdata2 \
+            -e WEINFER_API_KEYS="o:k:0000000000000000000000000000000000000000000000000000000000000000" \
+            -e WEINFER_BACKEND_URL="http://127.0.0.1:1" \
+            "${IMAGE}:${{ github.sha }}" > badsha.log 2>&1
+          CODE=$?
+          set -e
+          cat badsha.log
+          [ "$CODE" != "0" ]
+          grep -q "sha256 mismatch" badsha.log
+          echo "FAIL-CLOSED PASS: missing keys and bad pin both refuse"
