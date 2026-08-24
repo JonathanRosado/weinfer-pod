@@ -51,11 +51,17 @@ print('   model:', m['id'])
 
 say "5/7 submit + idempotent replay"
 REQ='{"model":"Qwen/Qwen2.5-7B-Instruct","messages":[{"role":"user","content":"Reply with exactly: canary-ok"}],"max_tokens":16}'
+# A TIGHT deadline (default 600s) makes the demand-led policy boot
+# within ~2 cycles instead of waiting until an hour-long deadline's
+# last responsible moment: lead = boot(452s) + cycle(60s) + margin.
+DEADLINE_SECS="${CANARY_DEADLINE_SECONDS:-600}"
 R1=$(curl -fsS -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
-  -H "Content-Type: application/json" -H "Idempotency-Key: canary-1" -d "$REQ")
+  -H "Content-Type: application/json" -H "Idempotency-Key: canary-1" \
+  -H "x-weinfer-deadline-seconds: $DEADLINE_SECS" -d "$REQ")
 JOB_ID=$(echo "$R1" | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
 R2=$(curl -fsS -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
-  -H "Content-Type: application/json" -H "Idempotency-Key: canary-1" -d "$REQ")
+  -H "Content-Type: application/json" -H "Idempotency-Key: canary-1" \
+  -H "x-weinfer-deadline-seconds: $DEADLINE_SECS" -d "$REQ")
 JOB_ID2=$(echo "$R2" | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
 [ "$JOB_ID" = "$JOB_ID2" ] || { echo "replay returned a DIFFERENT job" >&2; exit 1; }
 say "   job ${JOB_ID} (replay identical)"

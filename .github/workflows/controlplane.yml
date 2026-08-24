@@ -193,10 +193,13 @@ jobs:
             http://127.0.0.1:8080 creds.env
           # The accepted demand must drive a fake GPU create carrying
           # the derived callback + pinned provenance + cheapest SKU.
+          # BootForDeadline fires when remaining <= boot(452s) +
+          # cycle(60s) + margin(30s): with the driver's 600s deadline
+          # that is ~60-120s after acceptance.
           for i in $(seq 1 90); do
             [ -s /tmp/fake-runpod-bodies.jsonl ] && break
-            [ "$i" = 90 ] && { echo "no provider create fired"; docker logs mcp | tail -50; exit 1; }
-            sleep 2
+            [ "$i" = 90 ] && { echo "no provider create fired"; docker logs mcp | tail -60; exit 1; }
+            sleep 3
           done
           python3 - <<'PYEOF'
           import json
