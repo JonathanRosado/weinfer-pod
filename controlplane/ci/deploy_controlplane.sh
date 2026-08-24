@@ -39,7 +39,7 @@ read_provider_key() {
 }
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
-CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:23c8c8ada2025b27ab70eae48db8e5494ffc1ce32e4f3d1c1fa3d5c6e53a9349"
+CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:dc119010d53655502abfc554f0b047942973a1e18877c4a3f6c26a112e1d3481"
 GW_TAG="gateway-v0.3.0"
 GW_SHA="0a04c50fd5b60fc235a5cfc8ea1028f16f222b6c833cd63fc9dad4706aed96fe"
 WORKER_TAG="worker-v0.4.0"
