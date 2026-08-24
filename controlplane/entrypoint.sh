@@ -56,10 +56,20 @@ fi
 
 PGDATA_MODE=$(stat -c '%a' "$PGDATA_DIR")
 PGDATA_OWNER=$(stat -c '%u:%g' "$PGDATA_DIR")
+# CI can reproduce the live split view: root observes chmod(0700), while
+# the postgres uid still observes the network volume's uniform 0777 mode.
+# This changes only the diagnostic root view; compatibility selection below
+# is intentionally made from the real postgres-process view.
+if [ -n "${WEINFER_TEST_PGDATA_ROOT_VIEW_MODE:-}" ]; then
+  PGDATA_MODE="$WEINFER_TEST_PGDATA_ROOT_VIEW_MODE"
+fi
+POSTGRES_UID=$(id -u postgres)
+POSTGRES_GID=$(id -g postgres)
+PGDATA_PROCESS_RAW_VIEW=$(gosu postgres stat -c '%a:%u:%g' "$PGDATA_DIR")
 PG_PRELOAD=()
-case "$PGDATA_MODE" in
-  700|750)
-    echo "[entrypoint] pgdata permissions ${PGDATA_MODE} (${PGDATA_OWNER}) accepted natively"
+case "$PGDATA_PROCESS_RAW_VIEW" in
+  700:"${POSTGRES_UID}":"${POSTGRES_GID}"|750:"${POSTGRES_UID}":"${POSTGRES_GID}")
+    echo "[entrypoint] pgdata root view ${PGDATA_MODE}:${PGDATA_OWNER}; postgres raw view ${PGDATA_PROCESS_RAW_VIEW} accepted natively"
     ;;
   *)
     # RunPod Network Volumes report uniform permission bits even when
@@ -70,11 +80,9 @@ case "$PGDATA_MODE" in
     PG_PRELOAD=(env
       LD_PRELOAD=/usr/local/lib/weinfer-pgdata-mode.so
       WEINFER_PGDATA="$PGDATA_DIR")
-    echo "[entrypoint] pgdata permissions ${PGDATA_MODE} (${PGDATA_OWNER}); exact-path compatibility shim active"
+    echo "[entrypoint] pgdata root view ${PGDATA_MODE}:${PGDATA_OWNER}; postgres raw view ${PGDATA_PROCESS_RAW_VIEW}; exact-path compatibility shim active"
     ;;
 esac
-POSTGRES_UID=$(id -u postgres)
-POSTGRES_GID=$(id -g postgres)
 PGDATA_PROCESS_VIEW=$(gosu postgres "${PG_PRELOAD[@]}" stat -c '%a:%u:%g' "$PGDATA_DIR")
 case "$PGDATA_PROCESS_VIEW" in
   700:"${POSTGRES_UID}":"${POSTGRES_GID}"|750:"${POSTGRES_UID}":"${POSTGRES_GID}") ;;
