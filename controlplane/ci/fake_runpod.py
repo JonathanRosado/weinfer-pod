@@ -14,6 +14,7 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18990
 BODIES = "/tmp/fake-runpod-bodies.jsonl"
 DELETES = "/tmp/fake-runpod-deletes.log"
 CREATED = {}
+COUNTER = {"n": 0}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -49,7 +50,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raw = self.rfile.read(n)
         with open(BODIES, "ab") as f:
             f.write(raw + b"\n")
-        pod_id = f"fakegpu{len(CREATED) + 1}"
+        # Monotonic ids, NEVER reused after a delete (the real
+        # provider never reuses pod ids; reuse collided with the
+        # managed_pods primary key in the drain-reboot e2e).
+        COUNTER["n"] += 1
+        pod_id = f"fakegpu{COUNTER['n']}"
         body = json.loads(raw)
         CREATED[pod_id] = {
             "id": pod_id,
