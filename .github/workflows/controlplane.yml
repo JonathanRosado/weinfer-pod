@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.3.0
+  GATEWAY_TAG: gateway-v0.4.0
   WORKER_TAG: worker-v0.4.0
 
 jobs:
@@ -165,6 +165,10 @@ jobs:
         run: |
           FAKE=ci/fake_runpod_official.py WATCHDOG=ci/gpu_watchdog.sh \
             bash controlplane/ci/watchdog_regression.sh
+      - name: deploy-tail regression (the destructive path against a v1 fake)
+        run: |
+          FAKE=ci/fake_runpod_v1.py DEPLOY=ci/deploy_controlplane.sh \
+            bash controlplane/ci/deploy_tail_regression.sh
       - name: managed drain regression
         run: |
           set -x
@@ -197,6 +201,26 @@ jobs:
             sleep 2
           done
           docker logs mcp 2>&1 | grep -q "derived WEINFER_PUBLIC_BASE=https://fakecp-8080.proxy.runpod.net"
+          # CONCURRENT same-run setup: the SAME grant_id raced twice
+          # must land exactly ONE credit row (exact-idempotent grant).
+          curl -fsS -X POST http://127.0.0.1:8080/admin/organizations \
+            -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" \
+            -d '{"org_id":"org-conc","name":"Concurrent"}'
+          for i in 1 2; do
+            curl -sS -X POST http://127.0.0.1:8080/admin/organizations/org-conc/credits \
+              -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" \
+              -d '{"grant_id":"g-conc-1","amount_micro_usd":2000000,"memo":"conc"}' \
+              -o /dev/null &
+          done
+          wait
+          CONC_KEY=$(curl -fsS -X POST http://127.0.0.1:8080/admin/organizations/org-conc/keys \
+            -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" -d '{}' \
+            | python3 -c "import json,sys;print(json.load(sys.stdin)['raw_key'])")
+          CONC_CREDITS=$(curl -fsS http://127.0.0.1:8080/v1/balance \
+            -H "Authorization: Bearer $CONC_KEY" \
+            | python3 -c "import json,sys;print(json.load(sys.stdin)['credits_micro_usd'])")
+          [ "$CONC_CREDITS" = "2000000" ] || { echo "CONCURRENT GRANT DOUBLED: $CONC_CREDITS"; exit 1; }
+          echo "concurrent same-run grant: exactly one credit row"
           # The COMPLETE customer path with REAL settlement: the
           # actual released worker binary completes the jobs against a
           # fake engine.  Run ci1 polls to completion in the
@@ -224,7 +248,8 @@ jobs:
           assert "worker-v0.4.0" in env["WEINFER_WORKER_URL"]
           assert body["image"].startswith("ghcr.io/jonathanrosado/weinfer-pod@sha256:160a9268")
           assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
-          print("CREATE BODY PROVEN: derived callback + pinned provenance + cheapest measured SKU")
+          print("CREATE BODY PROVEN: derived callback + pinned provenance + "
+                "spec-pinned A4500 (legacy bootstrap; no measured identity claimed)")
           PYEOF
           # The REAL released worker against the fake engine: the
           # minted pod credential comes from the create body itself.

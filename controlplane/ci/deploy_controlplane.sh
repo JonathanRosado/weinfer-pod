@@ -23,15 +23,24 @@ RENDER_ONLY=0
 [ "${1:-}" = "--render-env" ] && RENDER_ONLY=1
 
 KEY_FILE="../rig/scaffold/runpod_account_a.txt"
-if [ "$RENDER_ONLY" = "0" ]; then
+DEPLOY_TEST="${WEINFER_DEPLOY_TEST:-0}"
+if [ "$RENDER_ONLY" = "0" ] && [ "$DEPLOY_TEST" = "0" ]; then
   [ -f "$KEY_FILE" ] || { echo "key file missing" >&2; exit 1; }
 fi
 API="https://rest.runpod.io/v1"
+if [ "$DEPLOY_TEST" = "1" ]; then
+  # TEST MODE (codex 0165: the destructive tail must be executable
+  # against a fake): provider + health bases point at the harness.
+  # Never set in production; the banner makes accidental use loud.
+  API="${WEINFER_DEPLOY_API_BASE:?test mode requires WEINFER_DEPLOY_API_BASE}"
+  echo "### DEPLOY TEST MODE: provider=${API} — NO REAL RESOURCES ###" >&2
+fi
 read_provider_key() {
-  # Render mode NEVER reads the real key — even when the file exists.
-  # The rendered JSON is written to disk/CI logs; the provider key
-  # must never appear anywhere but live pod env + provider calls.
-  if [ "$RENDER_ONLY" = "1" ]; then
+  # Render and test modes NEVER read the real key — even when the
+  # file exists.  The rendered JSON is written to disk/CI logs; the
+  # provider key must never appear anywhere but live pod env +
+  # provider calls.
+  if [ "$RENDER_ONLY" = "1" ] || [ "$DEPLOY_TEST" = "1" ]; then
     printf 'ci-fake-provider-key'
   else
     tr -d '[:space:]' < "$KEY_FILE"
@@ -40,8 +49,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:dc119010d53655502abfc554f0b047942973a1e18877c4a3f6c26a112e1d3481"
-GW_TAG="gateway-v0.3.0"
-GW_SHA="0a04c50fd5b60fc235a5cfc8ea1028f16f222b6c833cd63fc9dad4706aed96fe"
+GW_TAG="gateway-v0.4.0"
+GW_SHA="bf5b9cb846d07d77b848a3c49993b03305680e36e4e73532ea7dbdb3ac94e412"
 WORKER_TAG="worker-v0.4.0"
 WORKER_SHA="7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -65,7 +74,7 @@ echo "trust roots consistent (gateway ${GW_SHA:0:12}…, worker ${WORKER_SHA:0:1
 # ---------- burn ceiling ----------
 CEILING_CPU_USD_HR="0.10"     # refuse any CPU flavor above this
 VOLUME_GB=10                  # ~$0.70/month at the documented $0.07/GB-mo
-HEALTH_DEADLINE_SECS=900      # /healthz must answer within 15 min or we delete
+HEALTH_DEADLINE_SECS="${WEINFER_HEALTH_DEADLINE_SECS:-900}"  # /healthz within 15 min or we delete
 
 sha() { python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$1"; }
 rand() { python3 -c "import secrets;print(secrets.token_urlsafe(24))"; }
@@ -159,6 +168,10 @@ env = {
     # the CI worker e2e: one job released at deadline-2s and missed).
     # 30s covers poll cadence + grant latency honestly.
     "WEINFER_POLL_MARGIN_SECS": "30",
+    # The GPU create-rate bound (v0.4.0): creation itself refuses
+    # missing/malformed/over-bound rates, making the watchdog's
+    # wall-clock cap a HARD cap (same value the watchdog assumes).
+    "WEINFER_MAX_GPU_RATE": "0.40",
     "VLLM_EXTRA_ARGS": e["VLLM_EXTRA_ARGS"],
     "WEINFER_CONCURRENCY": e["CONCURRENCY"],
     "PYTORCH_CUDA_ALLOC_CONF": e["ALLOC_CONF"],
@@ -225,10 +238,13 @@ verify_pod_gone() { # pod_id -> 0 iff provider says 404/terminated
   code="${body##*$'\n'}"
   if [ "$code" = "404" ]; then return 0; fi
   [ "$code" = "200" ] || return 1
+  # EXITED means STOPPED (machine still assigned) in the official v2
+  # schema — only TERMINATED or 404 count as gone (codex 0165).
   printf '%s' "${body%$'\n'*}" | python3 -c "
 import json,sys
 pod=json.load(sys.stdin)
-sys.exit(0 if pod.get('desiredStatus') in ('EXITED','TERMINATED') else 1)"
+status=pod.get('status') or pod.get('desiredStatus') or ''
+sys.exit(0 if status == 'TERMINATED' else 1)"
 }
 
 delete_pod_verified() { # pod_id -> 0 iff deleted AND verified gone
@@ -282,7 +298,7 @@ print(match[0]['id'] if match else '')" 2>/dev/null) || {
 import json,sys
 pods=json.load(sys.stdin)
 pods=pods.get('pods', pods) if isinstance(pods, dict) else pods
-print(sum(1 for p in pods if p.get('desiredStatus') not in ('EXITED','TERMINATED')))") || {
+print(sum(1 for p in pods if (p.get('status') or p.get('desiredStatus')) != 'TERMINATED'))") || {
     echo "CLEANUP FAILED: zero-live verification could not run" >&2
     exit 1
   }
@@ -340,6 +356,7 @@ PY_EOF
 echo "rate \$${POD_RATE}/hr within ceiling \$${CEILING_CPU_USD_HR}/hr"
 
 PUBLIC_BASE="https://${POD_ID}-8080.proxy.runpod.net"
+if [ "$DEPLOY_TEST" = "1" ]; then PUBLIC_BASE="${WEINFER_DEPLOY_HEALTH_BASE:-$API}"; fi
 echo "== waiting for /healthz (deadline ${HEALTH_DEADLINE_SECS}s) =="
 DEADLINE=$(( $(date +%s) + HEALTH_DEADLINE_SECS ))
 until curl -sf --connect-timeout 10 --max-time 15 "${PUBLIC_BASE}/healthz" >/dev/null 2>&1; do

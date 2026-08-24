@@ -31,6 +31,22 @@ EXPECT_HOLD=827
 MAX_TOKENS=16
 
 say() { echo "[canary ${RUN_ID}] $*"; }
+
+# Success predicate: EXACT equality after whitespace strip (codex
+# 0165: substring matching accepted refusals that merely mentioned
+# the expected text).  Self-tested with mutations before any use.
+answer_ok() { # <content> -> exit 0 iff exactly canary-ok
+  python3 -c "import sys;sys.exit(0 if sys.argv[1].strip() == 'canary-ok' else 1)" "$1"
+}
+answer_ok "canary-ok" || { echo "PREDICATE BROKEN: exact match rejected" >&2; exit 1; }
+answer_ok " canary-ok
+" || { echo "PREDICATE BROKEN: strip failed" >&2; exit 1; }
+if answer_ok "I cannot comply; the requested text was canary-ok"; then
+  echo "PREDICATE BROKEN: refusal text passed" >&2; exit 1
+fi
+if answer_ok "canary-ok! extra"; then
+  echo "PREDICATE BROKEN: suffixed text passed" >&2; exit 1
+fi
 admin() { # method path [json]
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
@@ -60,14 +76,22 @@ else
   umask 077; printf '%s' "$CUSTOMER_KEY" > "$KEY_STORE"; chmod 600 "$KEY_STORE"
 fi
 
-say "3/8 bounded credit grant (\$2.00 once per run id — a RETRY never double-funds)"
+say "3/8 run-idempotent credit grant (grant_id bound to the run; \$2.00 exactly once)"
 FUNDED=$(balance | python3 -c "import json,sys;print(json.load(sys.stdin)['credits_micro_usd'])")
-if [ "$FUNDED" -lt "$CREDITS" ]; then
-  admin POST "/admin/organizations/${ORG}/credits" \
-    "{\"amount_micro_usd\":${CREDITS},\"memo\":\"canary-grant-${RUN_ID}\"}" >/dev/null
-else
-  say "   already funded (${FUNDED} micro): retry detected, grant skipped"
+if [ "$FUNDED" != "0" ] && [ "$FUNDED" != "$CREDITS" ]; then
+  echo "FOREIGN LEDGER STATE: org ${ORG} holds ${FUNDED} micro (expected 0 or ${CREDITS}) — refusing" >&2
+  exit 1
 fi
+# The grant_id IS the idempotency key: the server's exact-idempotent
+# grant makes a concurrent or retried setup a REPLAY, never a second
+# credit row (a mismatched replay is a 409, surfaced by -f).
+admin POST "/admin/organizations/${ORG}/credits" \
+  "{\"grant_id\":\"canary-grant-${RUN_ID}\",\"amount_micro_usd\":${CREDITS},\"memo\":\"canary-${RUN_ID}\"}" >/dev/null
+FUNDED=$(balance | python3 -c "import json,sys;print(json.load(sys.stdin)['credits_micro_usd'])")
+[ "$FUNDED" = "$CREDITS" ] || {
+  echo "FUNDING NOT EXACT before submit: ${FUNDED} != ${CREDITS}" >&2
+  exit 1
+}
 
 say "4/8 priced discovery: exact model, exact frozen prices, routable"
 curl -fsS "$BASE/v1/models" -H "Authorization: Bearer $CUSTOMER_KEY" | python3 -c "
@@ -145,15 +169,16 @@ if [ "$EXPECT_COMPLETION" = "1" ]; then
   done
   say "8/8 frozen-rate charge, hold release, balance conservation"
   python3 - "$MAX_TOKENS" "$S" <<'PY'
-import json, re, sys
+import json, sys
 max_tokens = int(sys.argv[1])
 s = json.loads(sys.argv[2])
 assert s['reconciliation'] == 'billed', s
 # A wrong answer is NOT a successful task: the model was told to
-# reply exactly canary-ok.
+# reply exactly canary-ok, and EXACTLY canary-ok (whitespace
+# stripped) is the only accepted answer (codex 0165).
 content = s['response']['choices'][0]['message']['content']
-assert 'canary-ok' in re.sub(r'\s+', ' ', content.strip().lower()), (
-    'model output does not contain canary-ok', content)
+assert content.strip() == 'canary-ok', (
+    'model output is not exactly canary-ok', content)
 u, c = s['usage'], s['charge']
 assert u['completion_tokens'] <= max_tokens, u
 expect = -(-u['prompt_tokens'] * 100000 // 1000000) + -(-u['completion_tokens'] * 400000 // 1000000)

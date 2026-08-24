@@ -74,11 +74,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(404, {})
 
     def do_DELETE(self):
+        # Official semantics: the FIRST delete stops the pod (EXITED —
+        # machine still assigned); only a follow-up delete terminates.
+        # The watchdog/deploy must keep sweeping until TERMINATED.
         pod_id = self.path.rsplit("/", 1)[1]
         with open(DELETES, "a") as f:
             f.write(pod_id + "\n")
         if pod_id in PODS:
-            PODS[pod_id]["status"] = "TERMINATED"
+            pod = PODS[pod_id]
+            pod["status"] = "TERMINATED" if pod["status"] == "EXITED" else "EXITED"
         self._send(200, {})
 
 

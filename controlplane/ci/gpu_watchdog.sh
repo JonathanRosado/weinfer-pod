@@ -71,7 +71,10 @@ for pod in pods:
     if not pod.get("name", "").startswith(prefix):
         continue
     status = pod.get("status") or pod.get("desiredStatus") or ""
-    terminal = status in ("EXITED", "TERMINATED")
+    # EXITED is STOPPED (machine still assigned), not gone: it keeps
+    # accruing fail-closed and stays in the sweep set until the
+    # provider says TERMINATED (codex 0165).
+    terminal = status == "TERMINATED"
     created = pod.get("createdAt")
     try:
         created_ts = datetime.datetime.fromisoformat(
@@ -130,7 +133,7 @@ delete_verified() { # pod_id -> 0 iff provider says 404/terminal
 import json,sys
 pod=json.load(sys.stdin)
 s=pod.get('status') or pod.get('desiredStatus') or ''
-sys.exit(0 if s in ('EXITED','TERMINATED') else 1)" && return 0
+sys.exit(0 if s == 'TERMINATED' else 1)" && return 0
     fi
     sleep $((attempt * 5))
   done
