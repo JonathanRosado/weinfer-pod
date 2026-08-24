@@ -36,7 +36,8 @@ jobs:
             ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:${{ github.sha }}
       - name: print pinned reference
-        run: echo "IMMUTABLE: ${IMAGE}@${{ steps.push.outputs.digest }}"
+        run: |
+          echo "IMMUTABLE: ${IMAGE}@${{ steps.push.outputs.digest }}"
 
   # Zero-GPU, zero-provider smoke: the container brings up durable
   # Postgres, fetches and sha-verifies the REAL released gateway, the
