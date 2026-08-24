@@ -147,6 +147,10 @@ jobs:
   managed:
     needs: build
     runs-on: ubuntu-latest
+    # A hang anywhere in the drain sequence must fail LOUDLY with
+    # logs, never sit on the runner (observed: an unbounded curl sat
+    # 70+ minutes).
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: image name (lowercase)
@@ -172,6 +176,7 @@ jobs:
       - name: managed drain regression
         run: |
           set -x
+          trap 'echo ==GATEWAY==; docker logs mcp 2>&1 | tail -60; echo ==WORKER==; tail -40 worker.log 2>/dev/null; echo ==CANARY==; tail -40 canary-ci1.log 2>/dev/null' ERR
           python3 controlplane/ci/fake_runpod.py 18990 &
           sleep 1
           # The EXACT deploy env, from the deploy script's own assembly.

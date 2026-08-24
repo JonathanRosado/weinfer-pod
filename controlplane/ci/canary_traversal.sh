@@ -50,14 +50,14 @@ fi
 admin() { # method path [json]
   local method="$1" path="$2" body="${3:-}"
   if [ -n "$body" ]; then
-    curl -fsS -X "$method" "$BASE$path" -H "Authorization: Bearer $ADMIN_KEY" \
+    curl -fsS --connect-timeout 10 --max-time 30 -X "$method" "$BASE$path" -H "Authorization: Bearer $ADMIN_KEY" \
       -H "Content-Type: application/json" -d "$body"
   else
-    curl -fsS -X "$method" "$BASE$path" -H "Authorization: Bearer $ADMIN_KEY"
+    curl -fsS --connect-timeout 10 --max-time 30 -X "$method" "$BASE$path" -H "Authorization: Bearer $ADMIN_KEY"
   fi
 }
 balance() {
-  curl -fsS "$BASE/v1/balance" -H "Authorization: Bearer $CUSTOMER_KEY"
+  curl -fsS --connect-timeout 10 --max-time 30 "$BASE/v1/balance" -H "Authorization: Bearer $CUSTOMER_KEY"
 }
 
 say "1/8 durable organization ${ORG}"
@@ -94,7 +94,7 @@ FUNDED=$(balance | python3 -c "import json,sys;print(json.load(sys.stdin)['credi
 }
 
 say "4/8 priced discovery: exact model, exact frozen prices, routable"
-curl -fsS "$BASE/v1/models" -H "Authorization: Bearer $CUSTOMER_KEY" | python3 -c "
+curl -fsS --connect-timeout 10 --max-time 30 "$BASE/v1/models" -H "Authorization: Bearer $CUSTOMER_KEY" | python3 -c "
 import json, sys
 models = json.load(sys.stdin)['data']
 assert models, 'catalog is EMPTY: the canary would run unpriced'
@@ -114,7 +114,7 @@ REQ="{\"model\":\"Qwen/Qwen2.5-7B-Instruct\",\"messages\":[{\"role\":\"user\",\"
 # within ~2 cycles instead of waiting until an hour-long deadline's
 # last responsible moment: lead = boot + cycle(60s) + margin(30s).
 DEADLINE_SECS="${CANARY_DEADLINE_SECONDS:-600}"
-R1=$(curl -fsS -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
+R1=$(curl -fsS --connect-timeout 10 --max-time 30 -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
   -H "Content-Type: application/json" -H "Idempotency-Key: ${IDEM}" \
   -H "x-weinfer-deadline-seconds: $DEADLINE_SECS" -d "$REQ")
 JOB_ID=$(echo "$R1" | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
@@ -137,7 +137,7 @@ elif b['reserved_micro_usd'] == 0 and b['spent_micro_usd'] > 0:
 else:
     raise AssertionError((b, 'neither a live reservation nor a settled replay state'))
 PY
-R2=$(curl -fsS -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
+R2=$(curl -fsS --connect-timeout 10 --max-time 30 -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
   -H "Content-Type: application/json" -H "Idempotency-Key: ${IDEM}" \
   -H "x-weinfer-deadline-seconds: $DEADLINE_SECS" -d "$REQ")
 JOB_ID2=$(echo "$R2" | python3 -c "import json,sys;print(json.load(sys.stdin)['job_id'])")
@@ -160,7 +160,7 @@ if [ "$EXPECT_COMPLETION" = "1" ]; then
   say "7/8 poll to completion"
   DEADLINE=$(( $(date +%s) + 1800 ))
   while :; do
-    S=$(curl -fsS "$BASE/v1/jobs/$JOB_ID" -H "Authorization: Bearer $CUSTOMER_KEY")
+    S=$(curl -fsS --connect-timeout 10 --max-time 30 "$BASE/v1/jobs/$JOB_ID" -H "Authorization: Bearer $CUSTOMER_KEY")
     STATUS=$(echo "$S" | python3 -c "import json,sys;print(json.load(sys.stdin)['status'])")
     [ "$STATUS" = "completed" ] && break
     [ "$STATUS" = "failed" ] && { echo "$S"; echo "job FAILED" >&2; exit 1; }
@@ -198,7 +198,7 @@ assert b['available_micro_usd'] == credits - charge, b
 assert b['available_micro_usd'] + b['spent_micro_usd'] == credits, (b, 'conservation')
 print('   hold released; spent + available == credits; CANARY COMPLETE')
 PY
-  python3 - "$JOB_ID" "$CHARGE" "$(curl -fsS "$BASE/v1/usage" -H "Authorization: Bearer $CUSTOMER_KEY")" <<'PY'
+  python3 - "$JOB_ID" "$CHARGE" "$(curl -fsS --connect-timeout 10 --max-time 30 "$BASE/v1/usage" -H "Authorization: Bearer $CUSTOMER_KEY")" <<'PY'
 import json, sys
 job_id, charge = sys.argv[1], int(sys.argv[2])
 rows = [r for r in json.loads(sys.argv[3])['data'] if r['job_id'] == job_id]
