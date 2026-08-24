@@ -29,6 +29,8 @@ CREDITS=2000000
 # ceil(max_tokens 16 * 400000 / 1e6) = 7.
 EXPECT_HOLD=827
 MAX_TOKENS=16
+ARTIFACT_DIR="${CANARY_ARTIFACT_DIR:-${HOME}/.weinfer/canary-${RUN_ID}}"
+mkdir -p "$ARTIFACT_DIR"; chmod 700 "$ARTIFACT_DIR"
 
 say() { echo "[canary ${RUN_ID}] $*"; }
 
@@ -155,6 +157,23 @@ print('   replay identical; ledger conserved')
 PY
 say "   job ${JOB_ID} (replay identical)"
 printf '%s' "$JOB_ID" > "/tmp/canary-${RUN_ID}.job"
+python3 - "$ARTIFACT_DIR/run.json" "$RUN_ID" "$JOB_ID" "$BASE" <<'PY'
+import json, os, sys, tempfile, time
+path, run_id, job_id, base = sys.argv[1:5]
+record = {
+    "run_id": run_id,
+    "job_id": job_id,
+    "public_base": base,
+    "recorded_at_epoch": int(time.time()),
+}
+fd, tmp = tempfile.mkstemp(prefix="run.", dir=os.path.dirname(path), text=True)
+with os.fdopen(fd, "w") as f:
+    json.dump(record, f, sort_keys=True, indent=2)
+    f.write("\n")
+os.chmod(tmp, 0o600)
+os.replace(tmp, path)
+PY
+say "   run pointer sealed at ${ARTIFACT_DIR}/run.json"
 
 if [ "$EXPECT_COMPLETION" = "1" ]; then
   say "7/8 poll to completion"

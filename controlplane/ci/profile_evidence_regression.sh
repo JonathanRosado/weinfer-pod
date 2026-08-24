@@ -86,6 +86,10 @@ def evaluate(env, contract):
     check("concurrency", env["WEINFER_CONCURRENCY"] == contract["concurrency"])
     check("alloc", env["PYTORCH_CUDA_ALLOC_CONF"] == contract["alloc_conf"])
     check("model", env["WEINFER_SERVED_MODEL"] == contract["model"])
+    check("recording-mode", env.get("WEINFER_PROFILE_EVIDENCE") == "1",
+          "ordinary canary must stamp its launch contract before create")
+    check("vram", env.get("WEINFER_GPU_VRAM_GB") == "20",
+          "A4500 launch contract must carry its declared 20GB capacity")
     # (3) the catalog sells no context beyond the executed bound.
     catalog = json.loads(env["WEINFER_MODEL_CATALOG"])
     ctx = int(env["WEINFER_BACKEND_MAX_CONTEXT"])

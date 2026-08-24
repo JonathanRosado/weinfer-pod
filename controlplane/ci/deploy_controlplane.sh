@@ -49,8 +49,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:dc119010d53655502abfc554f0b047942973a1e18877c4a3f6c26a112e1d3481"
-GW_TAG="gateway-v0.6.0"
-GW_SHA="b2f4664a2d4a604eb9d393e3fdad7bfff279c7c1f6163de092899e39e976d3e9"
+GW_TAG="gateway-v0.7.0"
+GW_SHA="e0450cc003cab7278125f93dfe820101f7c7c6464181fd1938bada80f9dd471c"
 WORKER_TAG="worker-v0.4.0"
 WORKER_SHA="7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -162,6 +162,11 @@ env = {
     # STATIC context authority (legacy bootstrap path, no profiles):
     # the catalog may never sell context the engine cannot execute.
     "WEINFER_BACKEND_MAX_CONTEXT": e["MAX_CTX"],
+    # Immutable ordinary-traffic profile provenance: the gateway
+    # canonicalizes revision/context into the EXECUTED argv and stamps
+    # the complete secret-free launch contract before provider create.
+    "WEINFER_PROFILE_EVIDENCE": "1",
+    "WEINFER_GPU_VRAM_GB": "20",
     # Aggregation release margin: the default 2s models only the
     # worker poll gap, so an underfilled batch releases at the razor
     # edge of its deadline and can EXPIRE at grant time (observed in

@@ -11,7 +11,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.6.0
+  GATEWAY_TAG: gateway-v0.7.0
   WORKER_TAG: worker-v0.4.0
 
 jobs:
@@ -141,7 +141,7 @@ jobs:
   # zero-spend fake provider.  Proves: serving reached, the priced
   # catalog is live, the customer path accepts + reserves, the fake
   # GPU create body carries the DERIVED public callback + pinned
-  # worker provenance + the cost planner's cheapest measured SKU, and
+  # worker provenance + the spec-pinned bootstrap SKU, and
   # `docker stop` (SIGTERM) drives the full drain: exactly one
   # provider delete, zero resurrection, durable database.
   managed:
@@ -165,6 +165,10 @@ jobs:
           DEPLOY_SCRIPT=ci/deploy_controlplane.sh \
           CONTRACT_FILE=ci/run_contract.stacked.json \
             bash controlplane/ci/profile_evidence_regression.sh
+      - name: immutable profile collector regression
+        run: |
+          COLLECTOR=ci/profile_collect.sh \
+            bash controlplane/ci/profile_collect_regression.sh
       - name: GPU watchdog regression (official v2 shape, churn-proof cap)
         run: |
           FAKE=ci/fake_runpod_official.py WATCHDOG=ci/gpu_watchdog.sh \
@@ -266,8 +270,18 @@ jobs:
           assert "worker-v0.4.0" in env["WEINFER_WORKER_URL"]
           assert body["image"].startswith("ghcr.io/jonathanrosado/weinfer-pod@sha256:160a9268")
           assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
+          args = env["VLLM_EXTRA_ARGS"].split()
+          expected = {
+              "--revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+              "--tokenizer-revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+              "--max-model-len": "8192",
+          }
+          for flag, value in expected.items():
+              assert args.count(flag) == 1, (flag, args)
+              assert args[args.index(flag) + 1] == value, (flag, args)
           print("CREATE BODY PROVEN: derived callback + pinned provenance + "
-                "spec-pinned A4500 (legacy bootstrap; no measured identity claimed)")
+                "canonical revision/context argv + spec-pinned A4500 "
+                "(legacy bootstrap; no measured identity claimed)")
           PYEOF
           # The REAL released worker against the fake engine: the
           # minted pod credential comes from the create body itself.
@@ -289,6 +303,21 @@ jobs:
           wait "$CANARY_PID" || { cat canary-ci1.log; tail -20 worker.log; exit 1; }
           cat canary-ci1.log
           J1=$(cat /tmp/canary-ci1.job)
+          curl -fsS "http://127.0.0.1:8080/admin/jobs/${J1}/profile-evidence" \
+            -H "Authorization: Bearer ci-admin" > profile-evidence.json
+          python3 - <<'PYEOF'
+          import hashlib, json
+          raw = json.load(open("profile-evidence.json"))
+          e, c = raw["evidence"], raw["launch_contract"]
+          assert raw["object"] == "profile_evidence"
+          assert e["job_state"] == "completed" and e["pod_state"] == "ready", e
+          assert e["provider_rate_micro_per_hour"] == 190000, e
+          assert len(e["attempts"]) == 1 and e["attempts"][0]["billable"] is True, e
+          assert c["worker_sha256"] == "7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
+          assert c["max_context_tokens"] == 8192 and c["gpu_sku"] == "NVIDIA RTX A4500", c
+          assert hashlib.sha256(e["launch_contract"].encode()).hexdigest() == raw["launch_contract_digest"]
+          print("IMMUTABLE PROFILE INPUTS PROVEN: contract + rate + attempt-exact usage")
+          PYEOF
           # Retry of ci1: replays the COMPLETED state (settled ledger,
           # conservation) without minting a key or double-funding.
           CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
@@ -333,5 +362,21 @@ jobs:
           ORGS=$(docker exec mcp2 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM organizations WHERE org_id IN ('org-canary-ci1','org-canary-ci2')")
           [ "$ORGS" = "2" ] || { echo "canary orgs did NOT survive (got $ORGS)"; exit 1; }
+          PHASES=$(docker exec mcp2 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT COUNT(*) FROM managed_pods WHERE launch_contract IS NOT NULL \
+             AND length(launch_contract_digest)=64 AND provider_rate_micro_per_hour=190000 \
+             AND created_at_micros<=ready_at_micros \
+             AND ready_at_micros<=(SELECT MIN(completed_at_micros) FROM jobs WHERE leased_pod_id=managed_pods.pod_id) \
+             AND (SELECT MAX(completed_at_micros) FROM jobs WHERE leased_pod_id=managed_pods.pod_id)<=draining_at_micros \
+             AND draining_at_micros<=terminate_requested_at_micros \
+             AND terminate_requested_at_micros<=terminated_at_micros \
+             AND terminated_at_micros<=charged_at_micros AND charged_at_micros<=settled_at_micros")
+          [ "$PHASES" = "1" ] || { echo "immutable phase chain missing: $PHASES"; exit 1; }
+          CONSERVED=$(docker exec mcp2 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
+            "SELECT p.charge_micro_usd = CAST(COALESCE(SUM(e.allocated_cost_micro_usd),0) AS BIGINT) \
+             FROM managed_pods p LEFT JOIN usage_attempt_events e \
+               ON e.kind='cost_allocation' AND (e.event_scope=p.pod_id OR e.event_scope LIKE p.pod_id || '#%') \
+             WHERE p.launch_contract IS NOT NULL GROUP BY p.pod_id,p.charge_micro_usd")
+          [ "$CONSERVED" = "t" ] || { echo "provider-to-ledger conservation failed: $CONSERVED"; exit 1; }
           docker rm -f mcp2
           echo "MANAGED PASS: serving, priced path, derived callback, pinned provenance, spec-pinned A4500 bootstrap, one delete, zero resurrection, durable"
