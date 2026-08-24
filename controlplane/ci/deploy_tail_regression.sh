@@ -80,7 +80,7 @@ run_deploy
 grep -q "CONTROL PLANE LIVE" /tmp/deploy-tail.log || { echo "S6 FAIL: no live banner"; cat /tmp/deploy-tail.log; exit 1; }
 [ ! -s /tmp/fake-v1-deletes.log ] || { echo "S6 FAIL: success path deleted a pod"; exit 1; }
 CRED=$(ls /tmp/deploy-tail-home/.weinfer/controlplane-credentials-*.env | head -1)
-PERM=$(stat -f '%Lp' "$CRED" 2>/dev/null || stat -c '%a' "$CRED")
+PERM=$(stat -c '%a' "$CRED" 2>/dev/null || stat -f '%Lp' "$CRED")
 [ "$PERM" = "600" ] || { echo "S6 FAIL: credentials mode $PERM"; exit 1; }
 grep -q "WEINFER_ADMIN_KEY=" "$CRED" || { echo "S6 FAIL: credentials incomplete"; exit 1; }
 echo "ok: S6 success path — live, credentials 0600, nothing deleted"
