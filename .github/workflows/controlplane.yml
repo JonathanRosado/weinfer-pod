@@ -211,13 +211,17 @@ jobs:
           curl -fsS -X POST http://127.0.0.1:8080/admin/organizations \
             -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" \
             -d '{"org_id":"org-conc","name":"Concurrent"}'
+          CURL_PIDS=""
           for i in 1 2; do
-            curl -sS -X POST http://127.0.0.1:8080/admin/organizations/org-conc/credits \
+            curl -sS --connect-timeout 10 --max-time 30 -X POST \
+              http://127.0.0.1:8080/admin/organizations/org-conc/credits \
               -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" \
               -d '{"grant_id":"g-conc-1","amount_micro_usd":2000000,"memo":"conc"}' \
-              -o /dev/null &
+              -o /dev/null & CURL_PIDS="$CURL_PIDS $!"
           done
-          wait
+          # wait ONLY the curls: a bare `wait` also waits on the
+          # forever-running fake provider (the 75-minute hang).
+          wait $CURL_PIDS
           CONC_KEY=$(curl -fsS -X POST http://127.0.0.1:8080/admin/organizations/org-conc/keys \
             -H "Authorization: Bearer ci-admin" -H "Content-Type: application/json" -d '{}' \
             | python3 -c "import json,sys;print(json.load(sys.stdin)['raw_key'])")
