@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 
 FAKE="${FAKE:-infra/controlplane/ci/fake_runpod_official.py}"
 WATCHDOG="${WATCHDOG:-scripts/gpu_watchdog.sh}"
-CAMPAIGN_WATCHDOG="${CAMPAIGN_WATCHDOG:-scripts/gpu_watchdog_campaign.sh}"
+CAMPAIGN_WATCHDOG="${CAMPAIGN_WATCHDOG:-${WATCHDOG%/*}/gpu_watchdog_campaign.sh}"
 PORT=18991
 CTRL="http://127.0.0.1:${PORT}/control"
 PREFIX="weinfer-community-qwen7b-0-"
