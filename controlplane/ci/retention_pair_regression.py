@@ -29,7 +29,9 @@ IDENTITY = {
     "cuda_class": "12",
 }
 LAUNCH_DIGEST = "a" * 64
-DEPLOY_SCRIPT = os.environ.get("DEPLOY_SCRIPT", "scripts/deploy_controlplane.sh")
+DEPLOY_SCRIPT = os.environ.get(
+    "DEPLOY_SCRIPT", "scripts/retention_pair_deploy_v0_9.sh"
+)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -147,6 +149,12 @@ def rendered_env(cycles: int | None) -> dict[str, str]:
 def run() -> None:
     default = rendered_env(None)
     parity = rendered_env(ARM_A_QUIET_CYCLES)
+    assert default["WEINFER_GATEWAY_SHA256"] == GATEWAY_SHA256
+    assert default["WEINFER_GPU_TYPE"] == "NVIDIA RTX A4500"
+    assert default["WEINFER_CUDA_VERSIONS"] == "12.8"
+    assert "WEINFER_BOOTSTRAP_MODE" not in default
+    assert "WEINFER_BOOTSTRAP_HARDWARE" not in default
+    assert "WEINFER_PLACEMENT_PROFILES" not in default
     assert default["WEINFER_DEMAND_QUIET_CYCLES"] == str(ARM_B_QUIET_CYCLES)
     assert parity["WEINFER_DEMAND_QUIET_CYCLES"] == str(ARM_A_QUIET_CYCLES)
     differing = {key for key in default if default[key] != parity.get(key)}
