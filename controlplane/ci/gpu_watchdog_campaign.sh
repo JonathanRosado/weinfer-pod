@@ -7,6 +7,10 @@
 #   WEINFER_WATCHDOG_CAMPAIGN_SECONDS=<positive> \
 #     scripts/gpu_watchdog_campaign.sh <key-file> <pre-launch-epoch> <ceiling-usd> \
 #       <pod-name-prefix> <control-plane-pod-id> [state-file]
+# A locally hosted control plane sets WEINFER_WATCHDOG_CONTROL_PID to its
+# process id; closeout then terminates and joins that process before touching
+# provider workers. The positional control-plane id remains the provider-pod
+# path and a durable label for the run.
 #
 # Accounting is CHURN-PROOF: every matching pod ever seen is recorded
 # in a persistent state file keyed by pod id; terminated or replaced
@@ -47,9 +51,19 @@ API="${WEINFER_RUNPOD_API:-https://api.runpod.io/v2}"
 MAX_RATE_USD_HR="${WEINFER_MAX_GPU_RATE:-0.40}"   # fail-closed accrual rate
 STANDDOWN_FILE="${WEINFER_WATCHDOG_STANDDOWN_FILE:-}"
 CAMPAIGN_SECONDS="${WEINFER_WATCHDOG_CAMPAIGN_SECONDS:?campaign seconds required}"
+CONTROL_PID="${WEINFER_WATCHDOG_CONTROL_PID:-}"
 
 [ -f "$KEY_FILE" ] || { echo "key file missing" >&2; exit 1; }
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
+if [ -n "$CONTROL_PID" ]; then
+  case "$CONTROL_PID" in
+    *[!0-9]*|'') echo "local control pid must be a positive integer" >&2; exit 1 ;;
+  esac
+  [ "$CONTROL_PID" -gt 0 ] && kill -0 "$CONTROL_PID" 2>/dev/null || {
+    echo "local control pid ${CONTROL_PID} is not alive at watchdog arm" >&2
+    exit 1
+  }
+fi
 
 # Control-plane lifetime and provider-blind spend authority are distinct.
 CAMPAIGN_DEADLINE_EPOCH=$(python3 - "$EPOCH" "$CAMPAIGN_SECONDS" <<'PY'
@@ -207,6 +221,38 @@ sys.exit(0 if s == 'TERMINATED' else 1)" && return 0
   return 1
 }
 
+stop_control_plane() {
+  if [ -z "$CONTROL_PID" ]; then
+    until delete_verified "$CONTROL_POD"; do
+      echo "[watchdog] control-plane kill unverified; retrying" >&2
+      sleep "$INTERVAL"
+    done
+    return 0
+  fi
+  if kill -0 "$CONTROL_PID" 2>/dev/null; then
+    kill -TERM "$CONTROL_PID" 2>/dev/null || true
+  fi
+  # SIGTERM enters the gateway's stop->join->cleanup->fenced-release barrier.
+  # Poll independently of the provider cadence so the dollar sweep is not
+  # delayed by a long observation interval.
+  local attempt
+  for attempt in $(seq 1 120); do
+    kill -0 "$CONTROL_PID" 2>/dev/null || {
+      echo "[watchdog] local control process ${CONTROL_PID} joined" >&2
+      return 0
+    }
+    sleep 1
+  done
+  echo "[watchdog] local control process ${CONTROL_PID} missed TERM bound; sending KILL" >&2
+  kill -KILL "$CONTROL_PID" 2>/dev/null || true
+  for attempt in $(seq 1 10); do
+    kill -0 "$CONTROL_PID" 2>/dev/null || return 0
+    sleep 1
+  done
+  echo "[watchdog] local control process ${CONTROL_PID} could not be stopped" >&2
+  return 1
+}
+
 closeout() { # label exit-code
   local label="$1" exit_code="$2"
   if [ "$label" = "breach" ]; then
@@ -214,8 +260,8 @@ closeout() { # label exit-code
   else
     echo "[watchdog] CAMPAIGN STAND-DOWN — control plane dies FIRST (resurrection barrier)" >&2
   fi
-  until delete_verified "$CONTROL_POD"; do
-    echo "[watchdog] control-plane kill unverified; retrying" >&2
+  until stop_control_plane; do
+    echo "[watchdog] control-plane stop unverified; retrying" >&2
     sleep "$INTERVAL"
   done
   # Kill workers, then demand THREE spaced clean reads.
@@ -273,7 +319,7 @@ mark_outage() { # now-epoch; close when blindness could spend the remainder
   fi
 }
 
-echo "[watchdog] armed: ceiling \$${CEILING_USD} cumulative, max-rate \$${MAX_RATE_USD_HR}/hr, campaign deadline epoch ${CAMPAIGN_DEADLINE_EPOCH}, outage budget independently bounded, prefix ${PREFIX}, control ${CONTROL_POD}"
+echo "[watchdog] armed: ceiling \$${CEILING_USD} cumulative, max-rate \$${MAX_RATE_USD_HR}/hr, campaign deadline epoch ${CAMPAIGN_DEADLINE_EPOCH}, outage budget independently bounded, prefix ${PREFIX}, control ${CONTROL_POD}, local_pid ${CONTROL_PID:-none}"
 FAILS=0
 while :; do
   NOW=$(date +%s)

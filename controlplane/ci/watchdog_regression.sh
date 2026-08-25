@@ -221,4 +221,42 @@ grep -q 'unreadable interval consumed the remaining spend authority' /tmp/wd.log
 }
 echo "ok: scenario G — provider blindness cannot outlive the remaining dollar budget"
 
+# --- Scenario H: a local control process is the resurrection barrier ------
+# The public-tunnel path has no provider control-pod id. Its real gateway PID
+# must receive TERM and exit BEFORE any provider worker delete is issued.
+rm -f /tmp/wd-state.json /tmp/wd.log /tmp/wd-standdown /tmp/fake-official-deletes.log
+(
+  trap 'echo LOCAL_CONTROL_TERM >> /tmp/fake-official-deletes.log; exit 0' TERM
+  while :; do sleep 1; done
+) & LOCAL_CONTROL_PID=$!
+spawn '{"id":"w8","name":"'"$PREFIX_LONG"'local-control","cost":0.19,"age_secs":1}'
+WEINFER_RUNPOD_API="http://127.0.0.1:${PORT}/v2" WEINFER_WATCHDOG_INTERVAL=1 \
+  WEINFER_MAX_GPU_RATE=0.40 WEINFER_WATCHDOG_CAMPAIGN_SECONDS=30 \
+  WEINFER_WATCHDOG_CONTROL_PID="$LOCAL_CONTROL_PID" \
+  WEINFER_WATCHDOG_STANDDOWN_FILE=/tmp/wd-standdown \
+  bash "$CAMPAIGN_WATCHDOG" /tmp/wd-key "$(date +%s)" 1.00 "$PREFIX_LONG" local-control /tmp/wd-state.json \
+  > /tmp/wd.log 2>&1 & WD_PID=$!
+for i in $(seq 1 20); do
+  grep -q "local_pid ${LOCAL_CONTROL_PID}" /tmp/wd.log 2>/dev/null && break
+  [ "$i" = 20 ] && { echo "FAIL: local-control watchdog never armed"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+touch /tmp/wd-standdown
+for i in $(seq 1 30); do
+  kill -0 "$WD_PID" 2>/dev/null || break
+  [ "$i" = 30 ] && { echo "FAIL: local-control stand-down never completed"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+wait "$WD_PID" && CODE=0 || CODE=$?
+[ "$CODE" = "0" ] || { echo "FAIL: local-control stand-down exited $CODE"; cat /tmp/wd.log; exit 1; }
+kill -0 "$LOCAL_CONTROL_PID" 2>/dev/null && { echo "FAIL: local control survived closeout"; exit 1; }
+[ "$(head -1 /tmp/fake-official-deletes.log)" = "LOCAL_CONTROL_TERM" ] || {
+  echo "FAIL: provider delete preceded local control termination"; cat /tmp/fake-official-deletes.log; exit 1;
+}
+grep -q '^w8$' /tmp/fake-official-deletes.log || { echo "FAIL: local-control worker not swept"; exit 1; }
+grep -q "local control process ${LOCAL_CONTROL_PID} joined" /tmp/wd.log || {
+  echo "FAIL: local control join not proven"; cat /tmp/wd.log; exit 1;
+}
+echo "ok: scenario H — local control joined before provider worker sweep"
+
 echo "WATCHDOG REGRESSION PASS"
