@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 
 FAKE="${FAKE:-infra/controlplane/ci/fake_runpod_official.py}"
 WATCHDOG="${WATCHDOG:-scripts/gpu_watchdog.sh}"
+CAMPAIGN_WATCHDOG="${CAMPAIGN_WATCHDOG:-scripts/gpu_watchdog_campaign.sh}"
 PORT=18991
 CTRL="http://127.0.0.1:${PORT}/control"
 PREFIX="weinfer-community-qwen7b-0-"
@@ -165,5 +166,59 @@ grep -q "stand-down handled: control plane down, workers gone, 3/3 zero-live rea
   echo "FAIL: stand-down closeout was not labeled/proven"; cat /tmp/wd.log; exit 1;
 }
 echo "ok: scenario E — deliberate stand-down exits 0 after CP-first and 3/3 zero-live"
+
+# --- Scenario F: healthy empty surveys may outlive the spend horizon ---
+# With a $0.001 ceiling and $3.60/hr maximum, the legacy wall would
+# fire after one second.  The long-campaign observer must remain alive
+# across healthy EMPTY surveys because no GPU spend exists.
+rm -f /tmp/wd-state.json /tmp/wd.log /tmp/wd-standdown /tmp/fake-official-deletes.log
+PREFIX_LONG="weinfer-watchdog-long-"
+spawn '{"id":"cp6","name":"weinfer-controlplane-long","cost":0.05,"age_secs":1}'
+WEINFER_RUNPOD_API="http://127.0.0.1:${PORT}/v2" WEINFER_WATCHDOG_INTERVAL=1 \
+  WEINFER_MAX_GPU_RATE=3.60 WEINFER_WATCHDOG_CAMPAIGN_SECONDS=30 \
+  WEINFER_WATCHDOG_STANDDOWN_FILE=/tmp/wd-standdown \
+  bash "$CAMPAIGN_WATCHDOG" /tmp/wd-key "$(date +%s)" 0.001 "$PREFIX_LONG" cp6 /tmp/wd-state.json \
+  > /tmp/wd.log 2>&1 & WD_PID=$!
+sleep 3
+kill -0 "$WD_PID" 2>/dev/null || {
+  echo "FAIL: healthy empty long campaign died at the short spend horizon"; cat /tmp/wd.log; exit 1;
+}
+grep -q 'cumulative \$0.000000 (0 live)' /tmp/wd.log || {
+  echo "FAIL: healthy empty surveys were not proven"; cat /tmp/wd.log; exit 1;
+}
+touch /tmp/wd-standdown
+for i in $(seq 1 30); do
+  kill -0 "$WD_PID" 2>/dev/null || break
+  [ "$i" = 30 ] && { echo "FAIL: long-campaign stand-down did not finish"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+wait "$WD_PID" && CODE=0 || CODE=$?
+[ "$CODE" = "0" ] || { echo "FAIL: long-campaign stand-down exited $CODE"; cat /tmp/wd.log; exit 1; }
+echo "ok: scenario F — healthy empty surveys extend time without extending dollars"
+
+# --- Scenario G: provider blindness still has a dollar backstop ---
+# The same one-second remaining-spend horizon MUST kill during a
+# continuous list outage even though the campaign wall is 30 seconds.
+rm -f /tmp/wd-state.json /tmp/wd.log /tmp/fake-official-deletes.log
+spawn '{"id":"cp7","name":"weinfer-controlplane-blind","cost":0.05,"age_secs":1}'
+curl -fsS -X POST "$CTRL/outage" -d '{"count":5}' >/dev/null
+WEINFER_RUNPOD_API="http://127.0.0.1:${PORT}/v2" WEINFER_WATCHDOG_INTERVAL=1 \
+  WEINFER_MAX_GPU_RATE=3.60 WEINFER_WATCHDOG_CAMPAIGN_SECONDS=30 \
+  bash "$CAMPAIGN_WATCHDOG" /tmp/wd-key "$(date +%s)" 0.001 "$PREFIX_LONG" cp7 /tmp/wd-state.json \
+  > /tmp/wd.log 2>&1 & WD_PID=$!
+for i in $(seq 1 30); do
+  kill -0 "$WD_PID" 2>/dev/null || break
+  [ "$i" = 30 ] && { echo "FAIL: blind interval never consumed spend authority"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+wait "$WD_PID" && CODE=0 || CODE=$?
+[ "$CODE" = "2" ] || { echo "FAIL: blind long campaign exited $CODE"; cat /tmp/wd.log; exit 1; }
+grep -q 'unreadable interval consumed the remaining spend authority' /tmp/wd.log || {
+  echo "FAIL: blind-spend backstop not named"; cat /tmp/wd.log; exit 1;
+}
+[ "$(head -1 /tmp/fake-official-deletes.log)" = "cp7" ] || {
+  echo "FAIL: blind-spend backstop did not kill the control plane first"; exit 1;
+}
+echo "ok: scenario G — provider blindness cannot outlive the remaining dollar budget"
 
 echo "WATCHDOG REGRESSION PASS"
