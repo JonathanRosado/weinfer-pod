@@ -10,8 +10,11 @@
 # Accounting is CHURN-PROOF: every matching pod ever seen is recorded
 # in a persistent state file keyed by pod id; terminated or replaced
 # pods KEEP their accrued spend, so supervisor churn can never reset
-# the meter.  An unknown or malformed rate accrues at the MAXIMUM
-# permitted rate (fail-closed, never zero).  A wall-clock deadline
+# the meter. A pod missing from the collection listing is reconciled
+# by exact id; 404/TERMINATED closes it at the observation time
+# (conservative), while any unreadable exact lookup keeps the survey
+# unresolved. An unknown or malformed rate accrues at the MAXIMUM
+# permitted rate (fail-closed, never zero). A wall-clock deadline
 # derived from the ceiling and the max rate backstops the whole watch
 # even if every survey fails.
 #
@@ -48,6 +51,60 @@ auth() { tr -d '[:space:]' < "$KEY_FILE"; }
 list_pods() {
   curl -fsS --connect-timeout 10 --max-time 30 "$API/pods" \
     -H "Authorization: Bearer $(auth)"
+}
+
+# The provider's collection endpoint can omit a recently terminated
+# pod.  Never translate that absence to "stopped at last sighting":
+# the paid canary proved that under-books the tail.  Reconcile every
+# unresolved historical id through the exact-id endpoint first.  A
+# 404 closes at NOW (safe over-count); a present pod is merged back
+# into the listing so the normal survey handles its current status.
+reconcile_missing() { # listing-json -> enriched listing-json
+  local enriched="$1" missing pod_id body code pod_json
+  missing=$(python3 - "$STATE_FILE" "$enriched" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+data = json.loads(sys.argv[2])
+pods = data.get("pods", data) if isinstance(data, dict) else data
+seen = {p.get("id") for p in pods}
+for pid, entry in state.items():
+    if "terminal_at" not in entry and pid not in seen:
+        print(pid)
+PY
+) || return 1
+  for pod_id in $missing; do
+    body=$(curl -sS --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
+      "$API/pods/${pod_id}" -H "Authorization: Bearer $(auth)") || return 1
+    code="${body##*$'\n'}"
+    pod_json="${body%$'\n'*}"
+    if [ "$code" = "404" ]; then
+      python3 - "$STATE_FILE" "$pod_id" <<'PY'
+import json, sys, time
+path, pid = sys.argv[1:]
+state = json.load(open(path))
+entry = state.get(pid)
+if entry is None:
+    raise SystemExit(f"missing watchdog state for {pid}")
+entry["terminal_at"] = min(float(entry.get("terminal_at", time.time())), time.time())
+json.dump(state, open(path, "w"))
+PY
+    elif [ "$code" = "200" ]; then
+      enriched=$(python3 - "$enriched" "$pod_json" <<'PY'
+import json, sys
+data, pod = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+if isinstance(data, dict):
+    data.setdefault("pods", []).append(pod)
+else:
+    data.append(pod)
+print(json.dumps(data, separators=(",", ":")))
+PY
+) || return 1
+    else
+      echo "[watchdog] exact lookup ${pod_id} returned HTTP ${code}" >&2
+      return 1
+    fi
+  done
+  printf '%s' "$enriched"
 }
 
 # survey <pods-json>: updates the persistent ledger, prints
@@ -93,6 +150,7 @@ for pod in pods:
     entry = state.get(pid, {"created": created_ts, "rate": rate})
     entry["rate"] = max(entry.get("rate", 0) or max_rate, rate)
     entry["created"] = min(float(entry.get("created", created_ts)), created_ts)
+    entry["name"] = pod.get("name", entry.get("name", ""))
     entry["last_seen"] = now
     if terminal:
         entry["terminal_at"] = min(float(entry.get("terminal_at", now)), now)
@@ -100,12 +158,6 @@ for pod in pods:
     seen_now.add(pid)
     if not terminal:
         live_ids.append(pid)
-
-# A pod that vanished from the listing is DONE accruing as of its
-# last sighting — but its spend up to then is kept forever.
-for pid, entry in state.items():
-    if pid not in seen_now and "terminal_at" not in entry:
-        entry["terminal_at"] = float(entry.get("last_seen", now))
 
 total = 0.0
 for entry in state.values():
@@ -154,6 +206,10 @@ breach() {
       echo "[watchdog] list failed during kill; retrying (fail-closed)" >&2
       sleep "$INTERVAL"; continue
     }
+    listing=$(reconcile_missing "$listing") || {
+      echo "[watchdog] exact reconciliation failed during kill; retrying" >&2
+      sleep "$INTERVAL"; continue
+    }
     out=$(survey "$listing") || { sleep 10; continue; }
     live=$(echo "$out" | awk '{print $3}')
     ids=$(echo "$out" | cut -d' ' -f4-)
@@ -183,6 +239,12 @@ while :; do
   fi
   if LISTING=$(list_pods); then
     FAILS=0
+    LISTING=$(reconcile_missing "$LISTING") || {
+      FAILS=$((FAILS + 1))
+      echo "[watchdog] missing-pod reconciliation FAILED — retrying, never under-booking" >&2
+      sleep "$INTERVAL"
+      continue
+    }
     OUT=$(survey "$LISTING") || { sleep 30; continue; }
     ACCRUED=$(echo "$OUT" | awk '{print $2}')
     LIVE=$(echo "$OUT" | awk '{print $3}')

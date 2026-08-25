@@ -99,4 +99,41 @@ grep -q "cumulative" /tmp/wd.log || { echo "FAIL: never recovered after outage";
 kill "$WD_PID" 2>/dev/null; wait "$WD_PID" 2>/dev/null || true
 echo "ok: scenario C — outage retried loudly, recovered, never exited blind"
 
+# --- Scenario D: a pod vanishes between collection reads -----------
+# The paid canary exposed the provider behavior: a terminated pod can
+# disappear from /pods before its final billed tail.  The watchdog
+# must close it at the exact-id 404 observation, never retroactively
+# at its older collection sighting.
+PREFIX_D="weinfer-watchdog-missing-"
+rm -f /tmp/wd-state.json /tmp/wd.log
+spawn '{"id":"wdrop","name":"'"$PREFIX_D"'worker","cost":0.19,"age_secs":100}'
+WEINFER_RUNPOD_API="http://127.0.0.1:${PORT}/v2" WEINFER_WATCHDOG_INTERVAL=1 \
+  bash "$WATCHDOG" /tmp/wd-key "$(( $(date +%s) - 3600 ))" 5.00 "$PREFIX_D" cp-none /tmp/wd-state.json \
+  > /tmp/wd.log 2>&1 & WD_PID=$!
+for i in $(seq 1 20); do
+  python3 -c 'import json,sys; d=json.load(open("/tmp/wd-state.json")); sys.exit(0 if "wdrop" in d else 1)' \
+    2>/dev/null && break
+  [ "$i" = 20 ] && { echo "FAIL: disappearing pod was never observed"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+sleep 2
+curl -fsS -X POST "$CTRL/drop" -d '{"id":"wdrop"}' >/dev/null
+for i in $(seq 1 20); do
+  python3 - <<'PY' 2>/dev/null && break
+import json, sys
+e = json.load(open("/tmp/wd-state.json"))["wdrop"]
+sys.exit(0 if e.get("terminal_at", 0) > e.get("last_seen", 0) else 1)
+PY
+  [ "$i" = 20 ] && { echo "FAIL: exact 404 did not conservatively close the pod"; cat /tmp/wd.log; cat /tmp/wd-state.json; exit 1; }
+  sleep 1
+done
+kill "$WD_PID" 2>/dev/null; wait "$WD_PID" 2>/dev/null || true
+python3 - <<'PY'
+import json
+e = json.load(open("/tmp/wd-state.json"))["wdrop"]
+assert e["terminal_at"] > e["last_seen"], e
+print(f"   missing-tail closure: +{e['terminal_at'] - e['last_seen']:.3f}s conservatively accrued")
+PY
+echo "ok: scenario D — vanished pod reconciled by exact id, never frozen at last sighting"
+
 echo "WATCHDOG REGRESSION PASS"

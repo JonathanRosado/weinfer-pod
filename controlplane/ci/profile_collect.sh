@@ -7,7 +7,12 @@
 # It never creates capacity and never reads the provider key.
 #
 # Usage:
-#   scripts/profile_collect.sh <public-base> <credentials-file> <run-id> [out-root]
+#   scripts/profile_collect.sh <public-base> <credentials-file> <run-id> \
+#       [out-root] [provider-observation-json]
+# The optional provider observation is a watchdog state snapshot.  It
+# is used only for a pre-0040 pod whose post-delete provider GET made
+# lifetime zero; its provider-authored createdAt is sealed alongside
+# the database response and all other fields remain DB authoritative.
 # Exit 2 means the pod charge is still pending/accruing; rerun later.
 set -euo pipefail
 
@@ -15,6 +20,7 @@ BASE="${1:?public base URL required}"
 CRED_FILE="${2:?credentials file required}"
 RUN_ID="${3:?canary run id required}"
 OUT_ROOT="${4:-${HOME}/.weinfer/canary-${RUN_ID}/profile-evidence}"
+PROVIDER_OBS_FILE="${5:-}"
 RUN_FILE="${CANARY_ARTIFACT_DIR:-${HOME}/.weinfer/canary-${RUN_ID}}/run.json"
 ADMIN_KEY=$(awk -F= '/^WEINFER_ADMIN_KEY=/{print $2}' "$CRED_FILE" | awk '{print $1}')
 [ -n "$ADMIN_KEY" ] || { echo "admin key missing from $CRED_FILE" >&2; exit 1; }
@@ -28,11 +34,14 @@ trap 'rm -rf "$TMP"' EXIT
 curl -fsS --connect-timeout 10 --max-time 30 \
   "$BASE/admin/jobs/$JOB_ID/profile-evidence" \
   -H "Authorization: Bearer $ADMIN_KEY" > "$TMP/raw.json"
+[ -z "$PROVIDER_OBS_FILE" ] || cp "$PROVIDER_OBS_FILE" "$TMP/provider_observation.json"
 
 set +e
-python3 - "$TMP/raw.json" "$TMP/candidate.json" "$TMP/summary.json" <<'PY'
+python3 - "$TMP/raw.json" "$TMP/candidate.json" "$TMP/summary.json" \
+  "${PROVIDER_OBS_FILE:+$TMP/provider_observation.json}" <<'PY'
 import hashlib, json, math, sys, time
-raw_path, candidate_path, summary_path = sys.argv[1:4]
+from decimal import Decimal
+raw_path, candidate_path, summary_path, provider_observation_path = sys.argv[1:5]
 raw = json.load(open(raw_path))
 assert raw["object"] == "profile_evidence", raw
 e = raw["evidence"]
@@ -48,7 +57,7 @@ if e["pod_state"] not in ("charged", "settled_provisional", "settled"):
 required = ["created_at_micros", "ready_at_micros", "completed_at_micros",
             "draining_at_micros", "terminate_requested_at_micros",
             "terminated_at_micros", "charged_at_micros", "settled_at_micros",
-            "charge_micro_usd", "lifetime_micros", "provider_rate_micro_per_hour"]
+            "charge_micro_usd", "provider_rate_micro_per_hour"]
 missing = [k for k in required if e.get(k) is None]
 if missing: pending(f"missing lifecycle facts: {missing}")
 
@@ -66,11 +75,11 @@ created, ready, completed, draining, terminate_requested, terminated, charged, s
                         "charged_at_micros", "settled_at_micros"))
 charge = int(e["charge_micro_usd"])
 allocated = int(e["allocated_cost_micro_usd"])
-lifetime = int(e["lifetime_micros"])
+lifetime = int(e.get("lifetime_micros") or 0)
 provider_rate = int(e["provider_rate_micro_per_hour"])
 assert 0 < created <= ready <= completed <= draining <= terminate_requested <= terminated
 assert terminated <= charged <= settled
-assert charge > 0 and lifetime > 0 and provider_rate > 0
+assert charge > 0 and provider_rate > 0
 assert allocated == charge, (allocated, charge, "provider charge must conserve into the ledger")
 
 attempts = e["attempts"]
@@ -92,6 +101,34 @@ ready_to_completion = completed - ready
 pre_service_idle = ready_to_completion - service_runtime
 retained_idle = draining - completed
 drain = terminated - draining
+provider_created = e.get("provider_created_at_micros")
+lifetime_source = "managed_pods.lifetime_micros"
+if provider_created is not None:
+    provider_created = int(provider_created)
+    derived_lifetime = terminated - provider_created
+    assert derived_lifetime > 0
+    if lifetime > 0:
+        assert lifetime == derived_lifetime, (lifetime, derived_lifetime)
+    else:
+        lifetime = derived_lifetime
+        lifetime_source = "managed_pods.provider_created_at_micros"
+elif lifetime <= 0:
+    if not provider_observation_path:
+        pending("provider lifetime is zero and no immutable provider-createdAt observation was supplied")
+    observation = json.load(open(provider_observation_path))
+    entry = observation.get(e["pod_id"])
+    if not isinstance(entry, dict) or entry.get("created") is None:
+        pending(f"provider observation has no createdAt for {e['pod_id']}")
+    provider_created_decimal = Decimal(str(entry["created"])) * Decimal(1_000_000)
+    assert provider_created_decimal == provider_created_decimal.to_integral_value(), entry
+    provider_created = int(provider_created_decimal)
+    observed_rate = Decimal(str(entry.get("rate"))) * Decimal(1_000_000)
+    assert observed_rate == observed_rate.to_integral_value(), entry
+    assert int(observed_rate) == provider_rate, (entry.get("rate"), provider_rate)
+    lifetime = terminated - provider_created
+    assert lifetime > 0
+    lifetime_source = "sealed_watchdog_provider_created_at"
+assert lifetime > 0
 provider_pre_adopt = lifetime - (terminated - created)
 assert pre_service_idle >= 0, (ready_to_completion, service_runtime,
     "completion wall time must cover served-attempt runtime")
@@ -121,6 +158,7 @@ assert tps_low > 0
 observed = int(time.time())
 source = (f"ordinary canary {e['job_id']} / pod {e['pod_id']}; exact launch contract "
           f"{raw['launch_contract_digest']}; provider-v2 provisional charge; "
+          f"lifetime source {lifetime_source}; "
           "throughput is a single-request service observation, not a saturation claim; "
           "lifecycle phases are immutable DB/provider records")
 facts = {
@@ -145,7 +183,7 @@ facts = {
     "vram_gb": int(c["vram_gb"]),
     "max_context_tokens": int(c["max_context_tokens"]),
     "catalog_available": True,
-    "recent_acquisition_failures": 0,
+    "recent_acquisition_failures": int(e.get("recent_provision_failures", 0)),
     "cuda_pin": c["cuda_pin"],
 }
 candidate = {
@@ -162,6 +200,12 @@ candidate = {
         "billable_tokens": tokens,
         "service_runtime_micros": service_runtime,
         "provider_pre_adopt_micros": provider_pre_adopt,
+        "provider_created_at_micros": provider_created,
+        "lifetime_source": lifetime_source,
+        "provider_observation_fields_used": ["created", "rate"]
+            if lifetime_source == "sealed_watchdog_provider_created_at" else [],
+        "provider_observation_fields_ignored": ["last_seen", "terminal_at"]
+            if lifetime_source == "sealed_watchdog_provider_created_at" else [],
         "boot_micros": boot,
         "activation_micros": activation,
         "pre_service_idle_micros": pre_service_idle,
@@ -185,6 +229,8 @@ with open(summary_path, "w") as f:
         "charge_micro_usd": charge, "billable_tokens": tokens,
         "delivered_usd_per_mtok": charge / tokens,
         "provider_pre_adopt_micros": provider_pre_adopt,
+        "provider_created_at_micros": provider_created,
+        "lifetime_source": lifetime_source,
         "boot_micros": boot, "activation_micros": activation,
         "pre_service_idle_micros": pre_service_idle,
         "service_runtime_micros": service_runtime,
@@ -202,11 +248,14 @@ OBS_EPOCH=$(python3 -c 'import time; print(time.time_ns())')
 SNAP="${OUT_ROOT}/observation-${OBS_EPOCH}"
 mkdir "$SNAP"; chmod 700 "$SNAP"
 cp "$TMP/raw.json" "$SNAP/raw.json"
+[ ! -f "$TMP/provider_observation.json" ] || cp "$TMP/provider_observation.json" "$SNAP/provider_observation.json"
 if [ "$STATUS" = "2" ]; then
   python3 - "$SNAP" <<'PY'
 import hashlib, json, os, sys
-root=sys.argv[1]; p=os.path.join(root,"raw.json")
-json.dump({"files":{"raw.json":hashlib.sha256(open(p,"rb").read()).hexdigest()},
+root=sys.argv[1]; names=["raw.json"]
+if os.path.exists(os.path.join(root,"provider_observation.json")):
+    names.append("provider_observation.json")
+json.dump({"files":{n:hashlib.sha256(open(os.path.join(root,n),"rb").read()).hexdigest() for n in names},
            "status":"pending"}, open(os.path.join(root,"MANIFEST.json"),"w"), indent=2)
 PY
   echo "profile evidence pending; raw snapshot: $SNAP" >&2
@@ -218,6 +267,8 @@ cp "$TMP/summary.json" "$SNAP/summary.json"
 python3 - "$SNAP" <<'PY'
 import hashlib, json, os, sys
 root=sys.argv[1]; names=["raw.json","profile_candidate.json","summary.json"]
+if os.path.exists(os.path.join(root,"provider_observation.json")):
+    names.append("provider_observation.json")
 manifest={"status":"candidate","files":{}}
 for name in names:
     manifest["files"][name]=hashlib.sha256(open(os.path.join(root,name),"rb").read()).hexdigest()

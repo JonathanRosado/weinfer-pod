@@ -6,6 +6,7 @@ desiredStatus/costPerHr variant) so the watchdog is proven against the
 documented shape.  The test drives scenarios through /control:
   POST /control/spawn   {"id","name","cost","age_secs"}  (cost may be garbage)
   POST /control/kill    {"id"}          mark TERMINATED without a DELETE
+  POST /control/drop    {"id"}          vanish from list and exact lookup
   POST /control/outage  {"count"}       next N list calls return 500
 Deletes are recorded in order to /tmp/fake-official-deletes.log.
 """
@@ -66,6 +67,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, {})
         elif self.path == "/control/kill":
             PODS[body["id"]]["status"] = "TERMINATED"
+            self._send(200, {})
+        elif self.path == "/control/drop":
+            PODS.pop(body["id"], None)
             self._send(200, {})
         elif self.path == "/control/outage":
             OUTAGE["count"] = body["count"]

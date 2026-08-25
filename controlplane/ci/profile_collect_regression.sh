@@ -52,9 +52,11 @@ class H(http.server.BaseHTTPRequestHandler):
             "terminate_requested_at_micros":8_000_000,
             "terminated_at_micros":9_000_000, "charged_at_micros":10_000_000,
             "settled_at_micros":11_000_000, "charge_micro_usd":charge,
-            "allocated_cost_micro_usd":allocated, "lifetime_micros":10_000_000,
+            "allocated_cost_micro_usd":allocated,
+            "lifetime_micros":0 if mode == "zero-lifetime" else 10_000_000,
             "launch_contract":contract_raw, "launch_contract_digest":digest,
             "provider_rate_micro_per_hour":190_000,
+            "recent_provision_failures":2,
             "attempts":[{"attempt":1,"runtime_micros":1_000_000,
                          "physical_prompt_tokens":10,"physical_completion_tokens":2,
                          "billable":True,"needs_reconciliation":False}],
@@ -94,6 +96,33 @@ assert d["time_conservation"] == d["lifetime_micros"] == 10_000_000
 assert c["profile_facts"]["rate_micro_per_hour"] == 216_000
 assert c["profile_facts"]["tps_low"] == c["profile_facts"]["tps_high"] == 12
 assert c["profile_facts"]["boot_low_micros"] == c["profile_facts"]["boot_high_micros"] == 4_000_000
+assert c["profile_facts"]["recent_acquisition_failures"] == 2
+PY
+
+# Pre-0040 live shape: provider billing arrived after the exact pod
+# resource was 404, so the stored lifetime is zero.  A sealed watchdog
+# provider-createdAt observation restores the exact decomposition and
+# must travel in the manifest.
+printf 'zero-lifetime\n' > "$TMP/mode"
+printf '{"pod-reg":{"created":0.5,"last_seen":8.0,"terminal_at":8.0,"rate":0.19}}\n' \
+  > "$TMP/provider-observation.json"
+HOME="$TMP/home" "$COLLECTOR" "$BASE" "$TMP/creds.env" reg "$TMP/zero" \
+  "$TMP/provider-observation.json" > "$TMP/zero.log"
+ZERO_SNAP=$(find "$TMP/zero" -mindepth 1 -maxdepth 1 -type d | head -1)
+python3 - "$ZERO_SNAP" <<'PY'
+import json, os, sys
+r=sys.argv[1]
+c=json.load(open(os.path.join(r,"profile_candidate.json")))
+d=c["derivation"]
+assert d["lifetime_source"] == "sealed_watchdog_provider_created_at"
+assert d["provider_created_at_micros"] == 500_000
+assert d["lifetime_micros"] == d["time_conservation"] == 8_500_000
+assert d["provider_pre_adopt_micros"] == 500_000
+assert d["provider_observation_fields_used"] == ["created", "rate"]
+assert d["provider_observation_fields_ignored"] == ["last_seen", "terminal_at"]
+assert os.path.exists(os.path.join(r,"provider_observation.json"))
+m=json.load(open(os.path.join(r,"MANIFEST.json")))
+assert "provider_observation.json" in m["files"]
 PY
 
 printf 'bad-cost\n' > "$TMP/mode"
@@ -115,4 +144,4 @@ PENDING_MANIFEST=$(find "$TMP/pending" -name MANIFEST.json -print -quit)
 [ -n "$PENDING_MANIFEST" ] || { echo "pending manifest missing" >&2; exit 1; }
 grep -q '"status": "pending"' "$PENDING_MANIFEST"
 
-echo "PROFILE COLLECT REGRESSION PASS: exact phases + money conservation; bad cost red; pending is resumable"
+echo "PROFILE COLLECT REGRESSION PASS: exact phases + provider-createdAt fallback + money conservation; bad cost red; pending is resumable"
