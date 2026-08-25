@@ -22,6 +22,7 @@ import time
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18992
 DELETES = "/tmp/fake-v1-deletes.log"
+BODIES = "/tmp/fake-v1-bodies.jsonl"
 STATE = {"mode": "ok", "list_delay": 0, "outage": 0, "counter": 0}
 PODS = {}
 VOLUMES = {}
@@ -80,6 +81,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                "size": body.get("size", 0)}
             self._send(200, VOLUMES[vol_id])
         elif self.path == "/pods":
+            with open(BODIES, "a") as f:
+                f.write(json.dumps(body, separators=(",", ":")) + "\n")
             STATE["counter"] += 1
             pod_id = f"cpupod{STATE['counter']}"
             pod = {

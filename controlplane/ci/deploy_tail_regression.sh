@@ -107,7 +107,7 @@ echo "ok: S5b unrecovered outage -> persisted state -> resume TERMINATED + clear
 
 # --- S6: the full success path — create, rate within ceiling, health
 # 200, LAUNCH_OK, credentials 0600, no cleanup delete.
-rm -f /tmp/fake-v1-deletes.log /tmp/deploy-tail-home/.weinfer/controlplane-credentials-* 2>/dev/null || true
+rm -f /tmp/fake-v1-deletes.log /tmp/fake-v1-bodies.jsonl /tmp/deploy-tail-home/.weinfer/controlplane-credentials-* 2>/dev/null || true
 mkdir -p /tmp/deploy-tail-home
 mode '{"mode":"ok","list_delay":0}'
 run_deploy
@@ -118,6 +118,13 @@ CRED=$(ls /tmp/deploy-tail-home/.weinfer/controlplane-credentials-*.env | head -
 PERM=$(stat -c '%a' "$CRED" 2>/dev/null || stat -f '%Lp' "$CRED")
 [ "$PERM" = "600" ] || { echo "S6 FAIL: credentials mode $PERM"; exit 1; }
 grep -q "WEINFER_ADMIN_KEY=" "$CRED" || { echo "S6 FAIL: credentials incomplete"; exit 1; }
+python3 - /tmp/fake-v1-bodies.jsonl <<'PY'
+import json, sys
+body = json.loads(open(sys.argv[1]).readlines()[-1])
+assert body["cpuFlavorIds"] == ["cpu3c", "cpu5c", "cpu3g", "cpu5g"], body
+assert body["cpuFlavorPriority"] == "availability", body
+assert body["vcpuCount"] == 2, body
+PY
 echo "ok: S6 success path — live, credentials 0600, nothing deleted"
 # (S6's pod is legitimately RUNNING; terminate it so the suite's final
 # state is clean, then confirm.)

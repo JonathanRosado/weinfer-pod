@@ -398,7 +398,13 @@ print(json.dumps({
     "name": name,
     "imageName": image,
     "computeType": "CPU",
-    "cpuFlavorIds": ["cpu3c"],
+    # The network volume fixes the data center, so one exhausted CPU
+    # family must not strand the durable control plane.  RunPod's
+    # availability priority selects among these official 2-vCPU
+    # families; the exact returned hourly rate remains subject to the
+    # hard $0.10 refusal/delete ceiling below.
+    "cpuFlavorIds": ["cpu3c", "cpu5c", "cpu3g", "cpu5g"],
+    "cpuFlavorPriority": "availability",
     "vcpuCount": 2,
     "containerDiskInGb": 10,
     "networkVolumeId": vol,
