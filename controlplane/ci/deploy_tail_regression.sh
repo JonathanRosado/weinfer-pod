@@ -121,7 +121,9 @@ grep -q "WEINFER_ADMIN_KEY=" "$CRED" || { echo "S6 FAIL: credentials incomplete"
 python3 - /tmp/fake-v1-bodies.jsonl <<'PY'
 import json, sys
 body = json.loads(open(sys.argv[1]).readlines()[-1])
-assert body["cpuFlavorIds"] == ["cpu3c", "cpu5c", "cpu3g", "cpu5g"], body
+assert body["cpuFlavorIds"] == [
+    "cpu3c", "cpu5c", "cpu3g", "cpu5g", "cpu3m", "cpu5m"
+], body
 assert body["cpuFlavorPriority"] == "availability", body
 assert body["vcpuCount"] == 2, body
 PY
