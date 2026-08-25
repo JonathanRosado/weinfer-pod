@@ -26,7 +26,9 @@
 # (desiredStatus/costPerHr).
 #
 # Exit 2 = ceiling or deadline breached, kills verified, zero-live
-# confirmed three times.  Runs forever otherwise.
+# confirmed three times.  A run-scoped stand-down file requests the
+# SAME CP-first/three-read closeout but exits 0 and labels it as an
+# intentional campaign end rather than a breach.  Runs forever otherwise.
 set -uo pipefail
 
 KEY_FILE="${1:?key file required}"
@@ -38,6 +40,7 @@ STATE_FILE="${6:-/tmp/gpu_watchdog_state.json}"
 INTERVAL="${WEINFER_WATCHDOG_INTERVAL:-60}"
 API="${WEINFER_RUNPOD_API:-https://api.runpod.io/v2}"
 MAX_RATE_USD_HR="${WEINFER_MAX_GPU_RATE:-0.40}"   # fail-closed accrual rate
+STANDDOWN_FILE="${WEINFER_WATCHDOG_STANDDOWN_FILE:-}"
 
 [ -f "$KEY_FILE" ] || { echo "key file missing" >&2; exit 1; }
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
@@ -192,8 +195,13 @@ sys.exit(0 if s == 'TERMINATED' else 1)" && return 0
   return 1
 }
 
-breach() {
-  echo "[watchdog] CAP BREACHED — control plane dies FIRST (resurrection barrier)" >&2
+closeout() { # label exit-code
+  local label="$1" exit_code="$2"
+  if [ "$label" = "breach" ]; then
+    echo "[watchdog] CAP BREACHED — control plane dies FIRST (resurrection barrier)" >&2
+  else
+    echo "[watchdog] CAMPAIGN STAND-DOWN — control plane dies FIRST (resurrection barrier)" >&2
+  fi
   until delete_verified "$CONTROL_POD"; do
     echo "[watchdog] control-plane kill unverified; retrying" >&2
     sleep "$INTERVAL"
@@ -225,14 +233,26 @@ breach() {
       done
     fi
   done
-  echo "[watchdog] breach handled: control plane down, workers gone, 3/3 zero-live reads" >&2
-  exit 2
+  echo "[watchdog] ${label} handled: control plane down, workers gone, 3/3 zero-live reads" >&2
+  exit "$exit_code"
+}
+
+breach() {
+  closeout breach 2
+}
+
+stand_down() {
+  closeout stand-down 0
 }
 
 echo "[watchdog] armed: ceiling \$${CEILING_USD} cumulative, max-rate \$${MAX_RATE_USD_HR}/hr, wall deadline epoch ${DEADLINE_EPOCH}, prefix ${PREFIX}, control ${CONTROL_POD}"
 FAILS=0
 while :; do
   NOW=$(date +%s)
+  if [ -n "$STANDDOWN_FILE" ] && [ -f "$STANDDOWN_FILE" ]; then
+    echo "[watchdog] run-scoped STAND-DOWN requested" >&2
+    stand_down
+  fi
   if [ "$NOW" -ge "$DEADLINE_EPOCH" ]; then
     echo "[watchdog] WALL-CLOCK deadline reached — treating as breach (fail-closed)" >&2
     breach

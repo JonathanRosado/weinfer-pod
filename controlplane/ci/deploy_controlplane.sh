@@ -49,8 +49,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:4253de39fb3af01cc80735ae40aa6f9c215b2271ce38dfb2fa79a8746b7d19e1"
-GW_TAG="gateway-v0.8.0"
-GW_SHA="586d172514a1499d444c6f0ab75900e7b75c6f0df41b3ee8ccea17deb3af8e7b"
+GW_TAG="gateway-v0.9.0"
+GW_SHA="e94bd6e6a87c5c802f0c8339db78c195923847e43321488cb531d5918b6f041e"
 WORKER_TAG="worker-v0.4.0"
 WORKER_SHA="7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -199,6 +199,10 @@ env = {
     # WEINFER_PUBLIC_BASE derived in-container from RUNPOD_POD_ID.
     "WEINFER_MANAGED": "1",
     "WEINFER_RESIDENCY": "1",
+    # Demand-aware retention: three complete 60s empty-horizon
+    # observations before an evidence-backed early drain.  One-boot
+    # parity remains the absolute ceiling in the gateway.
+    "WEINFER_DEMAND_QUIET_CYCLES": "3",
     "WEINFER_RUNPOD_API_KEY": e["RP_KEY"],
     "WEINFER_WORKER_KEYS": e["WORKER_RING"],
     "WEINFER_WORKER_URL": e["WORKER_URL"],

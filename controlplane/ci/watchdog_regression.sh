@@ -136,4 +136,34 @@ print(f"   missing-tail closure: +{e['terminal_at'] - e['last_seen']:.3f}s conse
 PY
 echo "ok: scenario D — vanished pod reconciled by exact id, never frozen at last sighting"
 
+# --- Scenario E: deliberate campaign stand-down is not a breach ---
+rm -f /tmp/wd-state.json /tmp/wd.log /tmp/wd-standdown /tmp/fake-official-deletes.log
+spawn '{"id":"cp5","name":"weinfer-controlplane-standdown","cost":0.05,"age_secs":10}'
+spawn '{"id":"w5","name":"'"$PREFIX"'standdown","cost":0.19,"age_secs":10}'
+WEINFER_RUNPOD_API="http://127.0.0.1:${PORT}/v2" WEINFER_WATCHDOG_INTERVAL=1 \
+  WEINFER_WATCHDOG_STANDDOWN_FILE=/tmp/wd-standdown \
+  bash "$WATCHDOG" /tmp/wd-key "$(date +%s)" 1.00 "$PREFIX" cp5 /tmp/wd-state.json \
+  > /tmp/wd.log 2>&1 & WD_PID=$!
+for i in $(seq 1 20); do
+  grep -q "cumulative" /tmp/wd.log 2>/dev/null && break
+  [ "$i" = 20 ] && { echo "FAIL: stand-down watchdog never surveyed"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+touch /tmp/wd-standdown
+for i in $(seq 1 30); do
+  kill -0 "$WD_PID" 2>/dev/null || break
+  [ "$i" = 30 ] && { echo "FAIL: stand-down never completed"; cat /tmp/wd.log; exit 1; }
+  sleep 1
+done
+wait "$WD_PID" && CODE=0 || CODE=$?
+[ "$CODE" = "0" ] || { echo "FAIL: stand-down exited $CODE"; cat /tmp/wd.log; exit 1; }
+[ "$(head -1 /tmp/fake-official-deletes.log)" = "cp5" ] || {
+  echo "FAIL: stand-down did not delete the control plane first"; cat /tmp/fake-official-deletes.log; exit 1;
+}
+grep -q '^w5$' /tmp/fake-official-deletes.log || { echo "FAIL: stand-down worker not swept"; exit 1; }
+grep -q "stand-down handled: control plane down, workers gone, 3/3 zero-live reads" /tmp/wd.log || {
+  echo "FAIL: stand-down closeout was not labeled/proven"; cat /tmp/wd.log; exit 1;
+}
+echo "ok: scenario E — deliberate stand-down exits 0 after CP-first and 3/3 zero-live"
+
 echo "WATCHDOG REGRESSION PASS"
