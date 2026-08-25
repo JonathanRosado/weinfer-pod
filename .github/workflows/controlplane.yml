@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.9.0
+  GATEWAY_TAG: gateway-v0.10.0
   WORKER_TAG: worker-v0.4.0
 
 jobs:
@@ -300,25 +300,31 @@ jobs:
           CANARY_RUN_ID=ci1 CANARY_EXPECT_COMPLETION=1 CANARY_KEY_STORE="$PWD/keys" \
             bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env \
             > canary-ci1.log 2>&1 & CANARY_PID=$!
-          # The accepted demand must drive a fake GPU create carrying
-          # the derived callback + pinned provenance + cheapest SKU.
+          # The accepted demand must drive the SAME-plan bootstrap
+          # fallback: catalog-cheapest A5000 denies at create truth,
+          # then the A4500 serves without surrendering the job.
           # BootForDeadline fires when remaining <= boot(452s) +
           # cycle(60s) + margin(30s): with the driver's 600s deadline
           # that is ~60-120s after acceptance.
           for i in $(seq 1 90); do
-            [ -s /tmp/fake-runpod-bodies.jsonl ] && break
-            [ "$i" = 90 ] && { echo "no provider create fired"; docker logs mcp | tail -60; exit 1; }
+            [ "$(wc -l < /tmp/fake-runpod-bodies.jsonl)" -ge 2 ] && break
+            [ "$i" = 90 ] && { echo "same-plan fallback did not reach two creates"; docker logs mcp | tail -60; exit 1; }
             sleep 3
           done
           python3 - <<'PYEOF'
           import json
-          body = json.loads(open("/tmp/fake-runpod-bodies.jsonl").readline())
+          bodies = [json.loads(line) for line in open("/tmp/fake-runpod-bodies.jsonl")]
+          assert [body["gpu"]["id"] for body in bodies[:2]] == [
+              "NVIDIA RTX A5000", "NVIDIA RTX A4500"
+          ], bodies
+          body = bodies[1]
           env = body["env"]
           assert env["WEINFER_GATEWAY_BASE"] == "https://fakecp-8080.proxy.runpod.net", env["WEINFER_GATEWAY_BASE"]
           assert env["WEINFER_WORKER_SHA256"] == "7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
           assert "worker-v0.4.0" in env["WEINFER_WORKER_URL"]
           assert body["image"].startswith("ghcr.io/jonathanrosado/weinfer-pod@sha256:160a9268")
           assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
+          assert body["gpu"]["allowedCudaVersions"] == ["12.8"], body["gpu"]
           args = env["VLLM_EXTRA_ARGS"].split()
           expected = {
               "--revision": "a09a35458c702b33eeacc393d103063234e8bc28",
@@ -328,13 +334,13 @@ jobs:
           for flag, value in expected.items():
               assert args.count(flag) == 1, (flag, args)
               assert args[args.index(flag) + 1] == value, (flag, args)
-          print("CREATE BODY PROVEN: derived callback + pinned provenance + "
-                "canonical revision/context argv + spec-pinned A4500 "
-                "(legacy bootstrap; no measured identity claimed)")
+          print("CREATE PATH PROVEN: live-price A5000 bootstrap denied, same plan "
+                "fell through to A4500; per-SKU CUDA + exact launch provenance; "
+                "no measured identity claimed")
           PYEOF
           # The REAL released worker against the fake engine: the
           # minted pod credential comes from the create body itself.
-          WORKER_KEY=$(python3 -c "import json;print(json.loads(open('/tmp/fake-runpod-bodies.jsonl').readline())['env']['WEINFER_WORKER_KEY'])")
+          WORKER_KEY=$(python3 -c "import json;print(json.loads(open('/tmp/fake-runpod-bodies.jsonl').read().splitlines()[1])['env']['WEINFER_WORKER_KEY'])")
           curl -fsSL -o weinfer-worker "https://github.com/${{ github.repository }}/releases/download/${WORKER_TAG}/weinfer-worker"
           W_SHA=$(curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${WORKER_TAG}/weinfer-worker.sha256" | awk '{print $1}')
           echo "${W_SHA}  weinfer-worker" | sha256sum -c -
@@ -428,4 +434,4 @@ jobs:
              WHERE p.launch_contract IS NOT NULL GROUP BY p.pod_id,p.charge_micro_usd")
           [ "$CONSERVED" = "t" ] || { echo "provider-to-ledger conservation failed: $CONSERVED"; exit 1; }
           docker rm -f mcp2
-          echo "MANAGED PASS: serving, priced path, derived callback, pinned provenance, spec-pinned A4500 bootstrap, one delete, zero resurrection, durable"
+          echo "MANAGED PASS: live-catalog bootstrap, A5000 denial -> A4500 same-plan service, priced path, one delete, zero resurrection, durable"

@@ -6,8 +6,8 @@
 # worker-v0.4.0 — a DIFFERENT exact identity by the launch-contract
 # digest's own authority.  Therefore:
 #   (1) the rendered deployment must carry NO measured placement
-#       profile (the legacy bootstrap path measures the current
-#       executable on its first ordinary traversal);
+#       profile; its explicit hardware queue may contain identity
+#       fields only — never tps/boot/rate evidence;
 #   (2) the engine-side launch bytes must EQUAL the frozen run
 #       contract (full canonical equality — an extra flag is a
 #       mismatch, not a superset pass);
@@ -71,6 +71,33 @@ def evaluate(env, contract):
               prod_worker == measured_worker,
               f"profiles claim Measured facts but production worker {prod_worker[:12]} "
               f"!= measured worker {measured_worker[:12]} — a different exact identity")
+    check("bootstrap-mode", env.get("WEINFER_BOOTSTRAP_MODE") == "1")
+    try:
+        bootstrap = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
+    except Exception as error:
+        bootstrap = []
+        check("bootstrap-json", False, str(error))
+    exact_keys = {"gpu_sku", "cuda_class", "vram_gb"}
+    check("bootstrap-shape",
+          bool(bootstrap) and all(set(row) == exact_keys for row in bootstrap),
+          "unmeasured hardware may carry identity fields only")
+    expected = {
+        "NVIDIA RTX A5000": 24,
+        "NVIDIA RTX 4000 SFF Ada Generation": 20,
+        "NVIDIA RTX A4500": 20,
+        "NVIDIA RTX 4000 Ada Generation": 20,
+        "NVIDIA GeForce RTX 3090": 24,
+        "NVIDIA GeForce RTX 3090 Ti": 24,
+        "NVIDIA RTX A6000": 48,
+        "NVIDIA GeForce RTX 4090": 24,
+        "NVIDIA A40": 48,
+    }
+    actual = {row.get("gpu_sku"): row.get("vram_gb") for row in bootstrap}
+    check("bootstrap-set", actual == expected, f"{actual} != {expected}")
+    check("bootstrap-cuda-class",
+          all(row.get("cuda_class") == "12" for row in bootstrap))
+    check("no-static-cuda-pin", "WEINFER_CUDA_VERSIONS" not in env,
+          "bootstrap CUDA is selected from the live catalog per attempt")
     # (2) engine launch bytes: FULL canonical equality.
     prod = canonical_pairs(production_canonical(env))
     sealed = canonical_pairs(contract["vllm_canonical_argv"])
@@ -78,18 +105,18 @@ def evaluate(env, contract):
           f"production {prod} != sealed {sealed}")
     check("image", env["WEINFER_IMAGE"] == contract["image"],
           f"{env['WEINFER_IMAGE']} != {contract['image']}")
-    check("gpu", env["WEINFER_GPU_TYPE"] == contract["gpu"],
-          f"{env['WEINFER_GPU_TYPE']} != {contract['gpu']}")
-    check("cuda", env["WEINFER_CUDA_VERSIONS"] == contract["cuda_pin"],
-          f"{env['WEINFER_CUDA_VERSIONS']} != {contract['cuda_pin']}")
+    # A4500 remains one explicit hardware identity from the sealed
+    # contract, but it no longer owns the whole deployment.  The other
+    # eight SKUs are unmeasured candidates under the same engine bytes.
+    check("sealed-hardware-present", actual.get(contract["gpu"]) == 20)
+    check("sealed-cuda-class",
+          all(str(pin).split(".", 1)[0] == "12" for pin in [contract["cuda_pin"]]))
     check("revision", env["WEINFER_MODEL_REVISION"] == contract["model_revision"])
     check("concurrency", env["WEINFER_CONCURRENCY"] == contract["concurrency"])
     check("alloc", env["PYTORCH_CUDA_ALLOC_CONF"] == contract["alloc_conf"])
     check("model", env["WEINFER_SERVED_MODEL"] == contract["model"])
     check("recording-mode", env.get("WEINFER_PROFILE_EVIDENCE") == "1",
           "ordinary canary must stamp its launch contract before create")
-    check("vram", env.get("WEINFER_GPU_VRAM_GB") == "20",
-          "A4500 launch contract must carry its declared 20GB capacity")
     # (3) the catalog sells no context beyond the executed bound.
     catalog = json.loads(env["WEINFER_MODEL_CATALOG"])
     ctx = int(env["WEINFER_BACKEND_MAX_CONTEXT"])
@@ -107,6 +134,12 @@ mut2 = dict(env)
 mut2["WEINFER_PLACEMENT_PROFILES"] = "[]"
 assert any("unmeasured-executable" in f for f in evaluate(mut2, contract)), \
     "DETECTOR BROKEN: profiles under a different worker identity passed"
+mut3 = dict(env)
+bad_bootstrap = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
+bad_bootstrap[0]["tps_low"] = 999999
+mut3["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(bad_bootstrap)
+assert any("bootstrap-shape" in f for f in evaluate(mut3, contract)), \
+    "DETECTOR BROKEN: unmeasured hardware smuggled performance facts"
 
 fails = evaluate(env, contract)
 if fails:
@@ -114,6 +147,6 @@ if fails:
     for f in fails:
         print("  -", f)
     sys.exit(1)
-print("PROFILE EVIDENCE REGRESSION PASS: no measured claim beyond the sealed record; "
-      "launch bytes equal the frozen contract; detector self-test red on mutations")
+print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities, no "
+      "economic claim; launch bytes equal the frozen contract; detector self-test red")
 PY

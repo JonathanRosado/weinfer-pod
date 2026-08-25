@@ -64,8 +64,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:4253de39fb3af01cc80735ae40aa6f9c215b2271ce38dfb2fa79a8746b7d19e1"
-GW_TAG="gateway-v0.9.0"
-GW_SHA="e94bd6e6a87c5c802f0c8339db78c195923847e43321488cb531d5918b6f041e"
+GW_TAG="gateway-v0.10.0"
+GW_SHA="5bb68314d4829b30d9b18589c946f2808a704f50dc41b396d82980632e4e1d91"
 WORKER_TAG="worker-v0.4.0"
 WORKER_SHA="7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -163,29 +163,41 @@ PY
   return 22
 }
 
-# ---------- serving configuration: the SEALED STACKED A4500 ARM ----------
-# EXACT production identity = the registered launch bytes of pair
-# p1787432264's stacked arm (codex 0163): same model length, seed,
-# flags, concurrency, allocator, GPU, CUDA pin.  We sell no context
-# beyond the executed bound.  profile_evidence_regression.sh refuses
-# any drift between this block, the sealed evidence, and the probe's
-# registered bytes.
+# ---------- serving bytes + explicit UNMEASURED hardware queue ----------
+# The engine bytes equal the sealed stacked launch, but the current
+# worker is a different executable identity.  Therefore NO SKU below
+# carries throughput/boot economics.  At the moment demand requires a
+# pod, the gateway reads the live provider catalog, filters this exact
+# hardware allow-list by cloud/VRAM/rate/CUDA, and bootstraps the
+# cheapest live hourly-price row.  Catalog presence is only a hint:
+# a definitive create denial falls through to the next row in the
+# same plan.  A SKU earns delivered-cost facts only from its own later
+# sealed traversal.
 SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct"
 MAX_CTX=8192
 VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill"
 CONCURRENCY="64"
 ALLOC_CONF="expandable_segments:True"
-CUDA_VERSIONS="12.8"
+BOOTSTRAP_HARDWARE='[
+  {"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24},
+  {"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20},
+  {"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20},
+  {"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20},
+  {"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24},
+  {"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24},
+  {"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48},
+  {"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24},
+  {"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48}
+]'
 
 # NO PLACEMENT PROFILES (codex 0164): the paid pair measured the
 # worker-v0.1.0 identity; production runs worker-v0.4.0 — a DIFFERENT
 # exact identity by the launch-contract digest's own authority.  The
-# first public canary therefore runs the legacy single-pool
-# provisioning path with explicit A4500/CUDA/8192/current-worker
-# launch bytes and the STATIC context authority; its own immutable
-# lifecycle/usage records become the v0.4 identity's first
-# measurement.  The old pair remains Conservative historical evidence
-# only.  profile_evidence_regression.sh enforces all of this.
+# available SKU therefore runs the explicit unmeasured-bootstrap path
+# with per-attempt live CUDA pinning, shared exact engine bytes, and
+# the STATIC context authority.  Its own immutable lifecycle/usage
+# records become that SKU's first current-worker measurement.  The old
+# pair remains Conservative historical evidence only.
 
 # ---------- priced customer catalog ----------
 CATALOG='{"revision":"cat-live-1","models":[{"id":"Qwen/Qwen2.5-7B-Instruct","input_price_micro_per_mtok":100000,"output_price_micro_per_mtok":400000,"capabilities":["chat"],"created":1787432264,"context_length":8192}]}'
@@ -200,7 +212,8 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   SERVED_MODEL="$SERVED_MODEL" QWEN_REV="$QWEN_REV" CATALOG="$CATALOG" \
   MAX_CTX="$MAX_CTX" VLLM_EXTRA_ARGS="$VLLM_EXTRA_ARGS" \
   CONCURRENCY="$CONCURRENCY" ALLOC_CONF="$ALLOC_CONF" \
-  CUDA_VERSIONS="$CUDA_VERSIONS" DEMAND_QUIET_CYCLES="$DEMAND_QUIET_CYCLES" \
+  BOOTSTRAP_HARDWARE="$BOOTSTRAP_HARDWARE" \
+  DEMAND_QUIET_CYCLES="$DEMAND_QUIET_CYCLES" \
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -223,6 +236,8 @@ env = {
     "WEINFER_WORKER_URL": e["WORKER_URL"],
     "WEINFER_WORKER_SHA256": e["WORKER_SHA"],
     "WEINFER_POOL": "community-qwen7b-0",
+    # Required legacy spec field; every bootstrap create overrides it
+    # with the selected exact SKU + live CUDA pin.
     "WEINFER_GPU_TYPE": "NVIDIA RTX A4500",
     "WEINFER_CLOUD": "COMMUNITY",
     "WEINFER_IMAGE": e["POD_IMAGE"],
@@ -230,14 +245,15 @@ env = {
     "WEINFER_MODEL_REVISION": e["QWEN_REV"],
     "WEINFER_TOKENIZER_REVISION": e["QWEN_REV"],
     "WEINFER_MODEL_CATALOG": e["CATALOG"],
-    # STATIC context authority (legacy bootstrap path, no profiles):
+    # STATIC context authority (unmeasured bootstrap path, no profiles):
     # the catalog may never sell context the engine cannot execute.
     "WEINFER_BACKEND_MAX_CONTEXT": e["MAX_CTX"],
+    "WEINFER_BOOTSTRAP_MODE": "1",
+    "WEINFER_BOOTSTRAP_HARDWARE": e["BOOTSTRAP_HARDWARE"],
     # Immutable ordinary-traffic profile provenance: the gateway
     # canonicalizes revision/context into the EXECUTED argv and stamps
     # the complete secret-free launch contract before provider create.
     "WEINFER_PROFILE_EVIDENCE": "1",
-    "WEINFER_GPU_VRAM_GB": "20",
     # Aggregation release margin: the default 2s models only the
     # worker poll gap, so an underfilled batch releases at the razor
     # edge of its deadline and can EXPIRE at grant time (observed in
@@ -251,7 +267,6 @@ env = {
     "VLLM_EXTRA_ARGS": e["VLLM_EXTRA_ARGS"],
     "WEINFER_CONCURRENCY": e["CONCURRENCY"],
     "PYTORCH_CUDA_ALLOC_CONF": e["ALLOC_CONF"],
-    "WEINFER_CUDA_VERSIONS": e["CUDA_VERSIONS"],
     "WEINFER_POD_DISK_GB": "40",
     "WEINFER_POD_HTTP_PORT": "8000",
 }
