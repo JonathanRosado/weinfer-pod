@@ -22,6 +22,21 @@ cd "$(dirname "$0")/.."
 RENDER_ONLY=0
 [ "${1:-}" = "--render-env" ] && RENDER_ONLY=1
 
+# Retention-policy arm selector.  Production defaults to the shipped
+# demand-aware policy (three complete quiet cycles).  Paid comparisons may
+# raise this value so the effective quiet window caps at one-boot parity,
+# producing a same-binary parity control.  Validate before trust-root or
+# provider calls: an arm typo must spend nothing.
+DEMAND_QUIET_CYCLES="${WEINFER_DEMAND_QUIET_CYCLES:-3}"
+python3 - "$DEMAND_QUIET_CYCLES" <<'PY'
+import sys
+raw = sys.argv[1]
+if not raw.isascii() or not raw.isdigit() or int(raw) <= 0:
+    raise SystemExit(
+        f"WEINFER_DEMAND_QUIET_CYCLES must be a positive base-10 integer, got {raw!r}"
+    )
+PY
+
 KEY_FILE="../rig/scaffold/runpod_account_a.txt"
 DEPLOY_TEST="${WEINFER_DEPLOY_TEST:-0}"
 if [ "$RENDER_ONLY" = "0" ] && [ "$DEPLOY_TEST" = "0" ]; then
@@ -185,7 +200,7 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   SERVED_MODEL="$SERVED_MODEL" QWEN_REV="$QWEN_REV" CATALOG="$CATALOG" \
   MAX_CTX="$MAX_CTX" VLLM_EXTRA_ARGS="$VLLM_EXTRA_ARGS" \
   CONCURRENCY="$CONCURRENCY" ALLOC_CONF="$ALLOC_CONF" \
-  CUDA_VERSIONS="$CUDA_VERSIONS" \
+  CUDA_VERSIONS="$CUDA_VERSIONS" DEMAND_QUIET_CYCLES="$DEMAND_QUIET_CYCLES" \
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -199,10 +214,10 @@ env = {
     # WEINFER_PUBLIC_BASE derived in-container from RUNPOD_POD_ID.
     "WEINFER_MANAGED": "1",
     "WEINFER_RESIDENCY": "1",
-    # Demand-aware retention: three complete 60s empty-horizon
-    # observations before an evidence-backed early drain.  One-boot
-    # parity remains the absolute ceiling in the gateway.
-    "WEINFER_DEMAND_QUIET_CYCLES": "3",
+    # Demand-aware retention defaults to three complete 60s empty-horizon
+    # observations.  The registered A/B control may raise this value until
+    # the gateway's one-boot parity cap becomes the effective TTL.
+    "WEINFER_DEMAND_QUIET_CYCLES": e["DEMAND_QUIET_CYCLES"],
     "WEINFER_RUNPOD_API_KEY": e["RP_KEY"],
     "WEINFER_WORKER_KEYS": e["WORKER_RING"],
     "WEINFER_WORKER_URL": e["WORKER_URL"],
@@ -466,6 +481,7 @@ echo "  public base:  ${PUBLIC_BASE}"
 echo "  pod:          ${POD_ID} (\$${POD_RATE:-?}/hr; ceiling \$${CEILING_CPU_USD_HR}/hr)"
 echo "  volume:       ${VOL_ID} (${VOLUME_GB}GB, durable)"
 echo "  credentials:  ${CRED_FILE}"
+echo "  retention:    demand_quiet_cycles=${DEMAND_QUIET_CYCLES}"
 echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + volume ~\$0.70/mo — founder-visible, deliberate"
 echo
 echo "next: scripts/canary_traversal.sh ${PUBLIC_BASE} ${CRED_FILE}"
