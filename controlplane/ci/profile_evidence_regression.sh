@@ -63,6 +63,14 @@ def evaluate(env, contract):
     def check(name, ok, detail=""):
         if not ok:
             fails.append(f"{name}: {detail}")
+    # The exact rendered map is serialized into Docker's env-file format by
+    # the release workflow. Embedded newlines would split a JSON value into
+    # bogus environment assignments and prevent the production container from
+    # starting, even though the JSON document itself parses successfully.
+    check("docker-env-file-shape",
+          all("\n" not in value and "\r" not in value
+              for value in env.values() if isinstance(value, str)),
+          "rendered string values must each fit on one physical env-file line")
     # (1) NO measured profile while the executable is unmeasured.
     prod_worker = env["WEINFER_WORKER_SHA256"]
     measured_worker = contract["worker_sha256"]
@@ -140,6 +148,10 @@ bad_bootstrap[0]["tps_low"] = 999999
 mut3["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(bad_bootstrap)
 assert any("bootstrap-shape" in f for f in evaluate(mut3, contract)), \
     "DETECTOR BROKEN: unmeasured hardware smuggled performance facts"
+mut4 = dict(env)
+mut4["WEINFER_BOOTSTRAP_HARDWARE"] = "[\n]"
+assert any("docker-env-file-shape" in f for f in evaluate(mut4, contract)), \
+    "DETECTOR BROKEN: a multiline Docker env-file value passed"
 
 fails = evaluate(env, contract)
 if fails:

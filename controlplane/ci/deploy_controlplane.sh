@@ -178,17 +178,10 @@ MAX_CTX=8192
 VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill"
 CONCURRENCY="64"
 ALLOC_CONF="expandable_segments:True"
-BOOTSTRAP_HARDWARE='[
-  {"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24},
-  {"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20},
-  {"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20},
-  {"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20},
-  {"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24},
-  {"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24},
-  {"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48},
-  {"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24},
-  {"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48}
-]'
+# Keep the JSON on one physical line: --render-env is also consumed as a
+# Docker env-file by the release smoke, whose format does not permit embedded
+# newlines in values.
+BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48},{"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48}]'
 
 # NO PLACEMENT PROFILES (codex 0164): the paid pair measured the
 # worker-v0.1.0 identity; production runs worker-v0.4.0 — a DIFFERENT
