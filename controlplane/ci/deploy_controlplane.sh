@@ -64,8 +64,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:4253de39fb3af01cc80735ae40aa6f9c215b2271ce38dfb2fa79a8746b7d19e1"
-GW_TAG="gateway-v0.14.0"
-GW_SHA="1e8f6f9cf58fb1057965af101ce66493b79c92bb5bab2f8ade78c4ec564d9ee9"
+GW_TAG="gateway-v0.15.0"
+GW_SHA="6063aa0bdb307f917025800771fddb6d083e2f65cc76dfc28adfbc30e7817cc7"
 WORKER_TAG="worker-v0.5.0"
 WORKER_SHA="422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -168,8 +168,9 @@ PY
 # worker is a different executable identity.  Therefore NO SKU below
 # carries throughput/boot economics.  At the moment demand requires a
 # pod, the gateway reads the live provider catalog, filters this exact
-# hardware allow-list by cloud/VRAM/rate/CUDA, and bootstraps the
-# cheapest live hourly-price row.  Catalog presence is only a hint:
+# hardware allow-list by cloud/VRAM/rate/CUDA, and ranks admitted rows
+# by live rate / an explicit hypothesis-only throughput prior.  Catalog
+# presence is only a hint:
 # a definitive create denial falls through to the next row in the
 # same plan.  A SKU earns delivered-cost facts only from its own later
 # sealed traversal.
@@ -181,7 +182,7 @@ ALLOC_CONF="expandable_segments:True"
 # Keep the JSON on one physical line: --render-env is also consumed as a
 # Docker env-file by the release smoke, whose format does not permit embedded
 # newlines in values.
-BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48},{"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48}]'
+BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":4000,"throughput_seed_kind":"policy_prior","throughput_seed_source":"bootstrap-policy-v1; no traffic observation"},{"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":2681,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed amort3full-1787755326; tps_low=2681; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 1/5 boots"},{"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":4161,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed batch-live-1787630415; tps_low=4161; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 2/5 boots"},{"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":4000,"throughput_seed_kind":"policy_prior","throughput_seed_source":"bootstrap-policy-v1; no traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":6000,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":6700,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48,"throughput_seed_tokens_per_sec":6500,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":13900,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48,"throughput_seed_tokens_per_sec":4000,"throughput_seed_kind":"policy_prior","throughput_seed_source":"bootstrap-policy-v1; no traffic observation"}]'
 
 # NO PLACEMENT PROFILES (codex 0164): the paid pair measured the
 # worker-v0.1.0 identity; production runs worker-v0.5.0 — a DIFFERENT

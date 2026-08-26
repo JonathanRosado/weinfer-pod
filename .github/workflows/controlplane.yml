@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.14.0
+  GATEWAY_TAG: gateway-v0.15.0
   WORKER_TAG: worker-v0.5.0
 
 jobs:
@@ -110,7 +110,7 @@ jobs:
           # binary and path production uses.
           MIGS=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
-          [ "$MIGS" -ge 42 ] || { echo "only $MIGS migrations applied"; exit 1; }
+          [ "$MIGS" -ge 43 ] || { echo "only $MIGS migrations applied"; exit 1; }
           # Both billing constraints are VALIDATED on the production path.
           VALIDATED=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM pg_constraint WHERE conname IN ('quoted_money_shape','billed_tokens_travel_together') AND convalidated")

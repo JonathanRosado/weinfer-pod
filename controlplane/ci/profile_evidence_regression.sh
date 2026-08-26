@@ -6,8 +6,9 @@
 # worker-v0.5.0 — a DIFFERENT exact identity by the launch-contract
 # digest's own authority.  Therefore:
 #   (1) the rendered deployment must carry NO measured placement
-#       profile; its explicit hardware queue may contain identity
-#       fields only — never tps/boot/rate evidence;
+#       profile; its explicit hardware queue may carry only identity
+#       plus a typed hypothesis-only throughput PRIOR — never
+#       tps_low/high, boot, rate, facts, or promotion evidence;
 #   (2) the engine-side launch bytes must EQUAL the frozen run
 #       contract (full canonical equality — an extra flag is a
 #       mismatch, not a superset pass);
@@ -85,10 +86,14 @@ def evaluate(env, contract):
     except Exception as error:
         bootstrap = []
         check("bootstrap-json", False, str(error))
-    exact_keys = {"gpu_sku", "cuda_class", "vram_gb"}
+    exact_keys = {
+        "gpu_sku", "cuda_class", "vram_gb",
+        "throughput_seed_tokens_per_sec", "throughput_seed_kind",
+        "throughput_seed_source",
+    }
     check("bootstrap-shape",
           bool(bootstrap) and all(set(row) == exact_keys for row in bootstrap),
-          "unmeasured hardware may carry identity fields only")
+          "unmeasured hardware may carry identity plus typed ordering prior only")
     expected = {
         "NVIDIA RTX A5000": 24,
         "NVIDIA RTX 4000 SFF Ada Generation": 20,
@@ -104,6 +109,38 @@ def evaluate(env, contract):
     check("bootstrap-set", actual == expected, f"{actual} != {expected}")
     check("bootstrap-cuda-class",
           all(row.get("cuda_class") == "12" for row in bootstrap))
+    expected_seeds = {
+        "NVIDIA RTX A5000": (4000, "policy_prior"),
+        "NVIDIA RTX 4000 SFF Ada Generation":
+            (2681, "traffic_observed_cross_identity"),
+        "NVIDIA RTX A4500": (4161, "traffic_observed_cross_identity"),
+        "NVIDIA RTX 4000 Ada Generation": (4000, "policy_prior"),
+        "NVIDIA GeForce RTX 3090": (6000, "spec_derived"),
+        "NVIDIA GeForce RTX 3090 Ti": (6700, "spec_derived"),
+        "NVIDIA RTX A6000": (6500, "spec_derived"),
+        "NVIDIA GeForce RTX 4090": (13900, "spec_derived"),
+        "NVIDIA A40": (4000, "policy_prior"),
+    }
+    actual_seeds = {
+        row.get("gpu_sku"): (
+            row.get("throughput_seed_tokens_per_sec"),
+            row.get("throughput_seed_kind"),
+        ) for row in bootstrap
+    }
+    check("bootstrap-seed-map", actual_seeds == expected_seeds,
+          f"{actual_seeds} != {expected_seeds}")
+    check("bootstrap-seed-provenance",
+          all(isinstance(row.get("throughput_seed_source"), str)
+              and row["throughput_seed_source"].strip()
+              and ((row["throughput_seed_kind"] == "traffic_observed_cross_identity"
+                    and "workload_sha256=2392bb58" in row["throughput_seed_source"]
+                    and "candidate_only" in row["throughput_seed_source"])
+                   or (row["throughput_seed_kind"] !=
+                       "traffic_observed_cross_identity"
+                       and "no traffic observation" in
+                           row["throughput_seed_source"]))
+              for row in bootstrap),
+          "traffic-backed and analytic/policy priors must remain visibly distinct")
     check("no-static-cuda-pin", "WEINFER_CUDA_VERSIONS" not in env,
           "bootstrap CUDA is selected from the live catalog per attempt")
     # (2) engine launch bytes: FULL canonical equality.
@@ -152,6 +189,12 @@ mut4 = dict(env)
 mut4["WEINFER_BOOTSTRAP_HARDWARE"] = "[\n]"
 assert any("docker-env-file-shape" in f for f in evaluate(mut4, contract)), \
     "DETECTOR BROKEN: a multiline Docker env-file value passed"
+mut5 = dict(env)
+forged = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
+forged[0]["throughput_seed_kind"] = "measured_exact_identity"
+mut5["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(forged)
+assert any("bootstrap-seed-map" in f for f in evaluate(mut5, contract)), \
+    "DETECTOR BROKEN: a bootstrap prior laundered itself as measured"
 
 fails = evaluate(env, contract)
 if fails:
@@ -160,5 +203,6 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities, no "
-      "economic claim; launch bytes equal the frozen contract; detector self-test red")
+      "economic claim; typed ordering priors cannot become Measured facts; launch bytes "
+      "equal the frozen contract; detector self-test red")
 PY
