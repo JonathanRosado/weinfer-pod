@@ -222,6 +222,19 @@ jobs:
           FROZEN_DEPLOY=ci/retention_pair_deploy_v0_9.sh \
           LIVE_DEPLOY=ci/deploy_controlplane.sh \
             bash controlplane/ci/retention_pair_substrate_regression.sh
+      - name: proxy-ingress batch retry contract
+        run: |
+          test ! -e controlplane/scripts
+          ln -s ci controlplane/scripts
+          BATCH_PRIOR_PROFILE=ci/public_batch_prior_profile.json \
+            bash controlplane/ci/public_batch_canary_regression.sh
+          rm controlplane/scripts
+      - name: one-shot retention window contract
+        run: |
+          test ! -e controlplane/scripts
+          ln -s ci controlplane/scripts
+          bash controlplane/ci/retention_pair_window_regression.sh
+          rm controlplane/scripts
       - name: GPU watchdog regression (official v2 shape, churn-proof cap)
         run: |
           FAKE=ci/fake_runpod_official.py WATCHDOG=ci/gpu_watchdog.sh \

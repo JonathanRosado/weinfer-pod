@@ -1,0 +1,79 @@
+{
+  "charge_finality": "provisional",
+  "derivation": {
+    "activation_micros": 382755146,
+    "active_window_tps_high": 4170,
+    "active_window_tps_low": 4169,
+    "allocated_cost_micro_usd": 64285,
+    "batch_run_id": "batch-live-1787630415",
+    "billable_tokens": 1199544,
+    "boot_micros": 382029911,
+    "boot_samples_micros": [
+      382755146,
+      429080126
+    ],
+    "charge_micro_usd": 64285,
+    "completion_tokens": 11544,
+    "cost_conservation": 64285,
+    "drain_micros": 731031,
+    "effective_lifecycle_rate_micro_per_hour": 195605,
+    "failed_generations": 0,
+    "jobs": 300,
+    "lifetime_micros": 1183131656,
+    "pre_service_idle_micros": 548164,
+    "prior_profile_source": "evidence/canary-live-1787603164/profile/profile_candidate.json",
+    "prompt_tokens": 1188000,
+    "provider_create_rate_micro_per_hour": 190000,
+    "provider_pre_adopt_micros": 725235,
+    "rate_clock_floor_micro_usd": 62444,
+    "ready_window_micros": 288242823,
+    "ready_window_tps_high": 4162,
+    "ready_window_tps_low": 4161,
+    "retained_idle_micros": 511402656,
+    "serving_window_micros": 287694659,
+    "settlement_commit_micros": 970254,
+    "settlement_visibility_lag_micros": 3743551809,
+    "sum_attempt_runtime_micros": 16653983722,
+    "time_conservation": 1183131656,
+    "workload_sha256": "2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205"
+  },
+  "profile_facts": {
+    "boot_high_micros": 429080126,
+    "boot_low_micros": 382755146,
+    "boot_scope": "SingleIdentity",
+    "catalog_available": true,
+    "cuda_pin": [
+      "12.8"
+    ],
+    "drain_high_micros": 731031,
+    "drain_low_micros": 731031,
+    "fixed_evidence": "Measured",
+    "identity": {
+      "cuda_class": "12",
+      "engine_config_digest": "0846aa7e4989aa1ed918b8c0f0a529ee155337d1566df365e0bcc94413fdf82b",
+      "gpu_sku": "NVIDIA RTX A4500",
+      "image_digest": "ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613",
+      "model_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "served_model": "Qwen/Qwen2.5-7B-Instruct",
+      "tokenizer_revision": "a09a35458c702b33eeacc393d103063234e8bc28"
+    },
+    "max_context_tokens": 8192,
+    "observed_at_epoch": 1787636876,
+    "rate_micro_per_hour": 195605,
+    "recent_acquisition_failures": 0,
+    "source": "public frozen batch batch-live-1787630415; 300 completed jobs; exact launch contract c8d341635ea6f517150119d6de061877e59c8e5a0301754e818490196f4cc700; provider-v2 provisional charge; throughput uses READY-to-last-completion product service window; all job usage and segments are attempt-exact; no engine knob changed",
+    "tps_evidence": "Measured",
+    "tps_high": 4162,
+    "tps_low": 4161,
+    "tps_scope": "SingleIdentity",
+    "vram_gb": 20
+  },
+  "promotion": {
+    "boot_samples_observed": 2,
+    "boot_samples_required": 5,
+    "decision": "review only; minimum boot-sample rule not met",
+    "eligible": false,
+    "saturation_samples_observed": 1
+  },
+  "status": "candidate_only"
+}
