@@ -3,7 +3,7 @@
 # what the sealed record measured.
 #
 # The paid pair measured the worker-v0.1.0 identity; production runs
-# worker-v0.4.0 — a DIFFERENT exact identity by the launch-contract
+# worker-v0.5.0 — a DIFFERENT exact identity by the launch-contract
 # digest's own authority.  Therefore:
 #   (1) the rendered deployment must carry NO measured placement
 #       profile; its explicit hardware queue may contain identity

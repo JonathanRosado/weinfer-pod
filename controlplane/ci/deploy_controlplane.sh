@@ -64,10 +64,10 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:4253de39fb3af01cc80735ae40aa6f9c215b2271ce38dfb2fa79a8746b7d19e1"
-GW_TAG="gateway-v0.13.0"
-GW_SHA="5675db476152640df707b272e7805a5248b1a4eec923ac837227791076b761ba"
-WORKER_TAG="worker-v0.4.0"
-WORKER_SHA="7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
+GW_TAG="gateway-v0.14.0"
+GW_SHA="1e8f6f9cf58fb1057965af101ce66493b79c92bb5bab2f8ade78c4ec564d9ee9"
+WORKER_TAG="worker-v0.5.0"
+WORKER_SHA="422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
 QWEN_REV="a09a35458c702b33eeacc393d103063234e8bc28"
 
@@ -184,7 +184,7 @@ ALLOC_CONF="expandable_segments:True"
 BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48},{"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24},{"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48}]'
 
 # NO PLACEMENT PROFILES (codex 0164): the paid pair measured the
-# worker-v0.1.0 identity; production runs worker-v0.4.0 — a DIFFERENT
+# worker-v0.1.0 identity; production runs worker-v0.5.0 — a DIFFERENT
 # exact identity by the launch-contract digest's own authority.  The
 # available SKU therefore runs the explicit unmeasured-bootstrap path
 # with per-attempt live CUDA pinning, shared exact engine bytes, and

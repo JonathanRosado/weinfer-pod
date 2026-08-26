@@ -16,8 +16,8 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.13.0
-  WORKER_TAG: worker-v0.4.0
+  GATEWAY_TAG: gateway-v0.14.0
+  WORKER_TAG: worker-v0.5.0
 
 jobs:
   build:
@@ -110,7 +110,7 @@ jobs:
           # binary and path production uses.
           MIGS=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
-          [ "$MIGS" -ge 38 ] || { echo "only $MIGS migrations applied"; exit 1; }
+          [ "$MIGS" -ge 42 ] || { echo "only $MIGS migrations applied"; exit 1; }
           # Both billing constraints are VALIDATED on the production path.
           VALIDATED=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM pg_constraint WHERE conname IN ('quoted_money_shape','billed_tokens_travel_together') AND convalidated")
@@ -339,8 +339,8 @@ jobs:
           body = bodies[1]
           env = body["env"]
           assert env["WEINFER_GATEWAY_BASE"] == "https://fakecp-8080.proxy.runpod.net", env["WEINFER_GATEWAY_BASE"]
-          assert env["WEINFER_WORKER_SHA256"] == "7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
-          assert "worker-v0.4.0" in env["WEINFER_WORKER_URL"]
+          assert env["WEINFER_WORKER_SHA256"] == "422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
+          assert "worker-v0.5.0" in env["WEINFER_WORKER_URL"]
           assert body["image"].startswith("ghcr.io/jonathanrosado/weinfer-pod@sha256:160a9268")
           assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
           assert body["gpu"]["allowedCudaVersions"] == ["12.8"], body["gpu"]
@@ -387,10 +387,36 @@ jobs:
           assert e["job_state"] == "completed" and e["pod_state"] == "ready", e
           assert e["provider_rate_micro_per_hour"] == 190000, e
           assert len(e["attempts"]) == 1 and e["attempts"][0]["billable"] is True, e
-          assert c["worker_sha256"] == "7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b"
+          assert c["worker_sha256"] == "422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
+          timing = {
+              key: e[key] for key in (
+                  "worker_process_started_wall_micros",
+                  "worker_process_started_monotonic_micros",
+                  "worker_engine_first_healthy_wall_micros",
+                  "worker_engine_first_healthy_monotonic_micros",
+                  "worker_registration_started_wall_micros",
+                  "worker_registration_started_monotonic_micros",
+              )
+          }
+          assert all(isinstance(value, int) for value in timing.values()), timing
+          assert timing["worker_process_started_monotonic_micros"] == 0, timing
+          assert 0 <= timing["worker_engine_first_healthy_monotonic_micros"] \
+              <= timing["worker_registration_started_monotonic_micros"], timing
+          provider_created = e["provider_created_at_micros"]
+          ready = e["ready_at_micros"]
+          wall_phases = [
+              timing["worker_process_started_wall_micros"] - provider_created,
+              timing["worker_engine_first_healthy_wall_micros"]
+                  - timing["worker_process_started_wall_micros"],
+              timing["worker_registration_started_wall_micros"]
+                  - timing["worker_engine_first_healthy_wall_micros"],
+              ready - timing["worker_registration_started_wall_micros"],
+          ]
+          assert all(phase >= 0 for phase in wall_phases), wall_phases
+          assert sum(wall_phases) == ready - provider_created, (wall_phases, e)
           assert c["max_context_tokens"] == 8192 and c["gpu_sku"] == "NVIDIA RTX A4500", c
           assert hashlib.sha256(e["launch_contract"].encode()).hexdigest() == raw["launch_contract_digest"]
-          print("IMMUTABLE PROFILE INPUTS PROVEN: contract + rate + attempt-exact usage")
+          print("IMMUTABLE PROFILE INPUTS PROVEN: contract + rate + attempt-exact usage + conserving boot phases")
           PYEOF
           # Retry of ci1: replays the COMPLETED state (settled ledger,
           # conservation) without minting a key or double-funding.
