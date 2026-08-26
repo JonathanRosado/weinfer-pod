@@ -112,10 +112,12 @@ print('   model priced exactly and routable')
 
 say "5/8 submit + idempotent replay (idempotency key ${IDEM})"
 REQ="{\"model\":\"Qwen/Qwen2.5-7B-Instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: canary-ok\"}],\"max_tokens\":${MAX_TOKENS}}"
-# A TIGHT deadline (default 600s) makes the demand-led policy boot
-# within ~2 cycles instead of waiting until an hour-long deadline's
-# last responsible moment: lead = boot + cycle(60s) + margin(30s).
-DEADLINE_SECS="${CANARY_DEADLINE_SECONDS:-600}"
+# A bounded 1,200-second deadline remains fast in CI/live canaries while
+# leaving the explicit unmeasured-hardware authority room to act:
+# fleet envelope 689s + uncertainty 60s + service/safety/cycle. Scarcity
+# can still pull this earlier; a smaller value would now be an honest
+# DeadlineUnachievable case, not an acceleration knob.
+DEADLINE_SECS="${CANARY_DEADLINE_SECONDS:-1200}"
 R1=$(curl -fsS --connect-timeout 10 --max-time 30 -X POST "$BASE/v1/jobs" -H "Authorization: Bearer $CUSTOMER_KEY" \
   -H "Content-Type: application/json" -H "Idempotency-Key: ${IDEM}" \
   -H "x-weinfer-deadline-seconds: $DEADLINE_SECS" -d "$REQ")

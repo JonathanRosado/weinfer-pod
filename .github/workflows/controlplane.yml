@@ -309,9 +309,9 @@ jobs:
           # The accepted demand must drive the SAME-plan bootstrap
           # fallback: catalog-cheapest A5000 denies at create truth,
           # then the A4500 serves without surrendering the job.
-          # BootForDeadline fires when remaining <= boot(452s) +
-          # cycle(60s) + margin(30s): with the driver's 600s deadline
-          # that is ~60-120s after acceptance.
+          # The driver's 1,200s deadline is above the unmeasured 749s
+          # boot authority + service/safety/cycle. LOW catalog scarcity
+          # moves the purchase earlier through the fixed-point money rule.
           for i in $(seq 1 90); do
             [ "$(wc -l < /tmp/fake-runpod-bodies.jsonl)" -ge 2 ] && break
             [ "$i" = 90 ] && { echo "same-plan fallback did not reach two creates"; docker logs mcp | tail -60; exit 1; }
