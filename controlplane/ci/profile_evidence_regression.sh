@@ -156,17 +156,18 @@ def evaluate(env, contract):
     check("bootstrap-cuda-class",
           all(row.get("cuda_class") == "12" for row in bootstrap))
     expected_seeds = {
-        "NVIDIA RTX A5000": (4000, "policy_prior"),
+        "NVIDIA RTX A5000": (2628, "policy_prior"),
         "NVIDIA RTX 4000 SFF Ada Generation":
             (2681, "traffic_observed_cross_identity"),
         "NVIDIA RTX A4500": (4161, "traffic_observed_cross_identity"),
-        "NVIDIA RTX 4000 Ada Generation": (4000, "policy_prior"),
-        "NVIDIA GeForce RTX 3090": (6000, "spec_derived"),
-        "NVIDIA GeForce RTX 3090 Ti": (6700, "spec_derived"),
-        "NVIDIA RTX A6000": (6500, "spec_derived"),
+        "NVIDIA RTX 4000 Ada Generation": (2628, "policy_prior"),
+        "NVIDIA GeForce RTX 3090":
+            (3943, "traffic_observed_cross_identity"),
+        "NVIDIA GeForce RTX 3090 Ti": (4403, "spec_derived"),
+        "NVIDIA RTX A6000": (4271, "spec_derived"),
         "NVIDIA GeForce RTX 4090":
             (9548, "traffic_observed_cross_identity"),
-        "NVIDIA A40": (4000, "policy_prior"),
+        "NVIDIA A40": (2628, "policy_prior"),
     }
     actual_seeds = {
         row.get("gpu_sku"): (
@@ -186,22 +187,56 @@ def evaluate(env, contract):
                    or (row["throughput_seed_kind"] !=
                        "traffic_observed_cross_identity"
                        and "no traffic observation" in
+                           row["throughput_seed_source"]
+                       and "basis=ready_window_tps_low" in
                            row["throughput_seed_source"]))
               for row in bootstrap),
           "traffic-backed and analytic/policy priors must remain visibly distinct")
+    raw_unobserved_seeds = {
+        "NVIDIA RTX A5000": 4000,
+        "NVIDIA RTX 4000 Ada Generation": 4000,
+        "NVIDIA GeForce RTX 3090 Ti": 6700,
+        "NVIDIA RTX A6000": 6500,
+        "NVIDIA A40": 4000,
+    }
+    throughput_sources = {
+        row.get("gpu_sku"): row.get("throughput_seed_source", "")
+        for row in bootstrap
+    }
+    check("bootstrap-ready-basis-calibration",
+          all(actual_seeds.get(sku, (None, None))[0] == raw * 3943 // 6000
+              and f"raw_seed={raw}" in throughput_sources.get(sku, "")
+              and "effective=floor(raw_seed*3943/6000)" in
+                  throughput_sources.get(sku, "")
+              and "seed4090-1787834610" in throughput_sources.get(sku, "")
+              and "seed3090-1787841661" in throughput_sources.get(sku, "")
+              for sku, raw in raw_unobserved_seeds.items()),
+          "every unobserved row must use the exact worst scored ready-window ratio")
+    check("observed-throughput-undiscounted",
+          {row["gpu_sku"]: row["throughput_seed_tokens_per_sec"]
+           for row in bootstrap
+           if row["throughput_seed_kind"] ==
+              "traffic_observed_cross_identity"} == {
+              "NVIDIA RTX 4000 SFF Ada Generation": 2681,
+              "NVIDIA RTX A4500": 4161,
+              "NVIDIA GeForce RTX 3090": 3943,
+              "NVIDIA GeForce RTX 4090": 9548,
+          },
+          "the calibration may never haircut a traffic-observed row")
     expected_fixed = {
-        "NVIDIA RTX A5000": (664034722, 731031, "policy_prior"),
+        "NVIDIA RTX A5000": (664034722, 740377, "policy_prior"),
         "NVIDIA RTX 4000 SFF Ada Generation":
             (492992942, 685232, "traffic_observed_cross_identity"),
         "NVIDIA RTX A4500":
             (429080126, 731031, "traffic_observed_cross_identity"),
-        "NVIDIA RTX 4000 Ada Generation": (664034722, 731031, "policy_prior"),
-        "NVIDIA GeForce RTX 3090": (664034722, 731031, "policy_prior"),
-        "NVIDIA GeForce RTX 3090 Ti": (664034722, 731031, "policy_prior"),
-        "NVIDIA RTX A6000": (664034722, 731031, "policy_prior"),
+        "NVIDIA RTX 4000 Ada Generation": (664034722, 740377, "policy_prior"),
+        "NVIDIA GeForce RTX 3090":
+            (462995788, 740377, "traffic_observed_cross_identity"),
+        "NVIDIA GeForce RTX 3090 Ti": (664034722, 740377, "policy_prior"),
+        "NVIDIA RTX A6000": (664034722, 740377, "policy_prior"),
         "NVIDIA GeForce RTX 4090":
             (664034722, 633859, "traffic_observed_cross_identity"),
-        "NVIDIA A40": (664034722, 731031, "policy_prior"),
+        "NVIDIA A40": (664034722, 740377, "policy_prior"),
     }
     actual_fixed = {
         row.get("gpu_sku"): (
@@ -221,6 +256,122 @@ def evaluate(env, contract):
                            row["fixed_seed_source"]))
               for row in bootstrap),
           "traffic-backed and policy fixed-cost priors must remain visibly distinct")
+    unobserved = [
+        row for row in bootstrap
+        if row["throughput_seed_kind"] != "traffic_observed_cross_identity"
+    ]
+    check("unobserved-capacity-preserved", len(unobserved) == 5,
+          "calibration must keep all five unobserved identities configured")
+    check("unobserved-drain-maximum",
+          all(row["drain_seed_micros"] == 740377
+              and "batch-live-1787630415/A4500" in row["fixed_seed_source"]
+              and "amort3full-1787755326/SFF Ada" in row["fixed_seed_source"]
+              and "seed4090-1787834610/RTX 4090" in row["fixed_seed_source"]
+              and "seed3090-1787841661/RTX 3090" in row["fixed_seed_source"]
+              for row in unobserved),
+          "the value and four-run maximum provenance must travel together")
+
+    # Exact community create rates from seed3090-1787841661's immutable
+    # pre-spend catalog, sha256 1250915f6e6d3fdb02eb55682bf5f41bfa0103844a069b0d56ef24c2e2463cb0.
+    # They make this an evidence-backed counterfactual red, never a claim that
+    # provider rates are static.
+    rates = {
+        "NVIDIA RTX A5000": 160000,
+        "NVIDIA RTX 4000 SFF Ada Generation": 180000,
+        "NVIDIA RTX A4500": 190000,
+        "NVIDIA RTX 4000 Ada Generation": 200000,
+        "NVIDIA GeForce RTX 3090": 220000,
+        "NVIDIA GeForce RTX 3090 Ti": 270000,
+        "NVIDIA RTX A6000": 330000,
+        "NVIDIA GeForce RTX 4090": 340000,
+        "NVIDIA A40": 350000,
+    }
+    delivered_batch_tokens = 1199508
+    # The production ranker consumes the conservative chars/4 request-body
+    # estimate, not terminal billable usage.  The frozen request is 21,533
+    # compact JSON bytes, hence floor(21533/4)+64 = 5,447 tokens/job and
+    # 1,634,100 tokens per 300-job batch.  Keep both bases explicit: the
+    # delivered-token series is useful cost sensitivity, while only the
+    # estimated-token series describes the live placement row.
+    estimated_batch_tokens = 1634100
+    def ordering_cost_at_tokens(row, tokens):
+        tps = row["throughput_seed_tokens_per_sec"]
+        serve = (tokens * 1000000 + tps - 1) // tps
+        numerator = (rates[row["gpu_sku"]]
+                     * (row["boot_seed_micros"] + serve
+                        + row["drain_seed_micros"])
+                     * 1000000)
+        denominator = 3600000000 * tokens
+        return (numerator + denominator - 1) // denominator
+    delivered_proxy_leaders = {
+        1: ("NVIDIA RTX A4500", 31596),
+        3: ("NVIDIA RTX A4500", 18988),
+        12: ("NVIDIA GeForce RTX 4090", 14253),
+        24: ("NVIDIA GeForce RTX 4090", 12073),
+    }
+    live_estimated_leaders = {
+        1: ("NVIDIA RTX A4500", 26566),
+        3: ("NVIDIA RTX A4500", 17312),
+        12: ("NVIDIA GeForce RTX 4090", 13093),
+        24: ("NVIDIA GeForce RTX 4090", 11493),
+    }
+    if (set(row.get("gpu_sku") for row in bootstrap) == set(rates)
+            and all(isinstance(row.get("throughput_seed_tokens_per_sec"), int)
+                    and row["throughput_seed_tokens_per_sec"] > 0
+                    and isinstance(row.get("boot_seed_micros"), int)
+                    and isinstance(row.get("drain_seed_micros"), int)
+                    for row in bootstrap)):
+        delivered_ranked = {
+            batches: sorted((
+                ordering_cost_at_tokens(row, delivered_batch_tokens * batches),
+                row["gpu_sku"], row)
+                for row in bootstrap)
+            for batches in delivered_proxy_leaders
+        }
+        live_ranked = {
+            batches: sorted((
+                ordering_cost_at_tokens(row, estimated_batch_tokens * batches),
+                row["gpu_sku"], row)
+                for row in bootstrap)
+            for batches in live_estimated_leaders
+        }
+        check("observed-leader-at-delivered-token-proxies",
+              all((delivered_ranked[batches][0][1],
+                   delivered_ranked[batches][0][0]) == expected
+                  and delivered_ranked[batches][0][2]["throughput_seed_kind"] ==
+                      "traffic_observed_cross_identity"
+                  for batches, expected in delivered_proxy_leaders.items()),
+              {batches: [(cost, sku) for cost, sku, _ in rows[:4]]
+               for batches, rows in delivered_ranked.items()})
+        check("observed-leader-at-live-estimated-backlogs",
+              all((live_ranked[batches][0][1],
+                   live_ranked[batches][0][0]) == expected
+                  and live_ranked[batches][0][2]["throughput_seed_kind"] ==
+                      "traffic_observed_cross_identity"
+                  for batches, expected in live_estimated_leaders.items()),
+              {batches: [(cost, sku) for cost, sku, _ in rows[:4]]
+               for batches, rows in live_ranked.items()})
+        a5000 = next(row for row in bootstrap
+                     if row["gpu_sku"] == "NVIDIA RTX A5000")
+        raw_a5000 = dict(a5000)
+        raw_a5000["throughput_seed_tokens_per_sec"] = 4000
+        raw_cost = ordering_cost_at_tokens(
+            raw_a5000, 12 * estimated_batch_tokens)
+        calibrated_cost = ordering_cost_at_tokens(
+            a5000, 12 * estimated_batch_tokens)
+        check("calibration-omission-red",
+              raw_cost == 12618
+              and calibrated_cost == 18419
+              and raw_cost < live_ranked[12][0][0]
+              and calibrated_cost > live_ranked[12][2][0],
+              "without calibration the unobserved A5000 would lead at the live 12-batch estimated backlog")
+    else:
+        check("observed-leader-at-delivered-token-proxies", False,
+              "exact nine-row typed input is required")
+        check("observed-leader-at-live-estimated-backlogs", False,
+              "exact nine-row typed input is required")
+        check("calibration-omission-red", False,
+              "exact nine-row typed input is required")
     check("no-static-cuda-pin", "WEINFER_CUDA_VERSIONS" not in env,
           "bootstrap CUDA is selected from the live catalog per attempt")
     # (2) engine launch bytes: one exact registered delta, never a
@@ -301,6 +452,25 @@ forged_fixed[0]["fixed_seed_kind"] = "measured_exact_identity"
 mut9["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(forged_fixed)
 assert any("bootstrap-fixed-seed-map" in f for f in evaluate(mut9, contract)), \
     "DETECTOR BROKEN: a bootstrap fixed-cost prior laundered itself as measured"
+mut10 = dict(env)
+forged_observed = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
+forged_observed[0]["throughput_seed_kind"] = "traffic_observed_cross_identity"
+forged_observed[0]["throughput_seed_source"] = (
+    "fabricated sealed source; basis=ready_window_tps_low; "
+    "workload_sha256=2392bb58; candidate_only 1/5 boots"
+)
+mut10["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(forged_observed)
+assert any("bootstrap-seed-map" in f for f in evaluate(mut10, contract)), \
+    "DETECTOR BROKEN: an unobserved SKU escaped calibration through fake traffic provenance"
+mut11 = dict(env)
+discounted_observed = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
+for row in discounted_observed:
+    if row["gpu_sku"] == "NVIDIA GeForce RTX 3090":
+        row["throughput_seed_tokens_per_sec"] = 2591
+mut11["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(discounted_observed)
+assert any("observed-throughput-undiscounted" in f
+           for f in evaluate(mut11, contract)), \
+    "DETECTOR BROKEN: the calibration was applied to an observed row"
 
 fails = evaluate(env, contract)
 if fails:
@@ -309,8 +479,10 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities, no "
-      "economic claim; independent typed throughput/fixed-cost priors cannot become "
-      "Measured facts or deadline authority; launch bytes "
+      "economic claim; scored ready-window calibration preserves all candidates and "
+      "an observed leader at delivered-token proxies and live estimated backlogs for "
+      "1/3/12/24 batches; independent typed throughput/fixed-cost "
+      "priors cannot become Measured facts or deadline authority; launch bytes "
       "equal the frozen contract plus one registered positive cache flag; historical "
       "effective cache state UNKNOWN; detector self-test red")
 PY
