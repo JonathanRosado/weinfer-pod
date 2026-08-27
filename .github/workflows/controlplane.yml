@@ -320,7 +320,7 @@ jobs:
             bash controlplane/ci/canary_traversal.sh http://127.0.0.1:8080 creds.env \
             > canary-ci1.log 2>&1 & CANARY_PID=$!
           # The accepted demand must drive the SAME-plan bootstrap
-          # fallback: catalog-cheapest A5000 denies at create truth,
+          # fallback: delivered-cost-ranked A5000 denies at create truth,
           # then the A4500 serves without surrendering the job.
           # The driver's 1,200s deadline is above the unmeasured 749s
           # boot authority + service/safety/cycle. LOW catalog scarcity

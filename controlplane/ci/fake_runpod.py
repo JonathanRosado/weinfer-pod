@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Zero-spend RunPod REST v2 fake for the managed control-plane CI.
 
-The live catalog advertises two bootstrap SKUs.  The cheapest
-(A5000) is definitively denied at create truth and the A4500 succeeds,
-so the real gateway must fall through inside one plan.  Every request
+The live catalog advertises two bootstrap SKUs.  The boot-aware
+delivered-cost ranker selects the deliberately cheap fake A5000 first;
+it is definitively denied at create truth and the A4500 succeeds, so
+the real gateway must fall through inside one plan.  Every request
 body and delete is recorded to files the workflow asserts on, and
 billing reports a covered provisional charge so drain settlement
 completes.
@@ -41,7 +42,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "id": "NVIDIA RTX A5000", "memory": 24,
                     "community": True, "secure": True,
                     "availability": "LOW",
-                    "price": {"community": 0.16},
+                    # Deliberately below the real catalog price.  The
+                    # bootstrap ranker now includes fixed activation cost,
+                    # so the former $0.16 fixture correctly ranked the
+                    # faster-booting A4500 first and never exercised
+                    # fallthrough.  $0.08 makes rank 1 unambiguous while
+                    # remaining a provider-authored live-rate input.
+                    "price": {"community": 0.08},
                     "cudaVersions": [{"version": "12.8", "available": True}],
                 },
                 {
