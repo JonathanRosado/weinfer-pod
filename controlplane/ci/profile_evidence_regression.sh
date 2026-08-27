@@ -3,15 +3,18 @@
 # what the sealed record measured.
 #
 # The paid pair measured the worker-v0.1.0 identity; production runs
-# worker-v0.5.0 — a DIFFERENT exact identity by the launch-contract
+# worker-v0.6.0 — a DIFFERENT exact identity by the launch-contract
 # digest's own authority.  Therefore:
 #   (1) the rendered deployment must carry NO measured placement
 #       profile; its explicit hardware queue may carry only identity
 #       plus a typed hypothesis-only throughput PRIOR — never
 #       tps_low/high, boot, rate, facts, or promotion evidence;
-#   (2) the engine-side launch bytes must EQUAL the frozen run
-#       contract (full canonical equality — an extra flag is a
-#       mismatch, not a superset pass);
+#   (2) the engine-side launch bytes may differ from the frozen run by
+#       EXACTLY one registered product change: the positive valueless
+#       --enable-prefix-caching flag. Historical effective cache state
+#       is UNKNOWN because no sealed run captured engine metrics. The
+#       new worker independently observes the effective vLLM config
+#       before READY; argv is declaration, never runtime evidence;
 #   (3) the run contract itself is immutable: sha256-pinned here and
 #       recorded in the sealed MANIFEST.
 # The gate self-tests its own detector with mutations before ruling.
@@ -143,11 +146,17 @@ def evaluate(env, contract):
           "traffic-backed and analytic/policy priors must remain visibly distinct")
     check("no-static-cuda-pin", "WEINFER_CUDA_VERSIONS" not in env,
           "bootstrap CUDA is selected from the live catalog per attempt")
-    # (2) engine launch bytes: FULL canonical equality.
+    # (2) engine launch bytes: one exact registered delta, never a
+    # permissive superset comparison.
     prod = canonical_pairs(production_canonical(env))
     sealed = canonical_pairs(contract["vllm_canonical_argv"])
-    check("argv-equality", prod == sealed,
-          f"production {prod} != sealed {sealed}")
+    registered_delta = [("--enable-prefix-caching", "")]
+    check("argv-registered-cache-delta", prod == sorted(sealed + registered_delta),
+          f"production {prod} != sealed {sealed} + {registered_delta}")
+    check("positive-prefix-cache-flag",
+          prod.count(("--enable-prefix-caching", "")) == 1
+          and all(flag != "--no-enable-prefix-caching" for flag, _ in prod),
+          "production must declare exactly one positive valueless cache flag")
     check("image", env["WEINFER_IMAGE"] == contract["image"],
           f"{env['WEINFER_IMAGE']} != {contract['image']}")
     # A4500 remains one explicit hardware identity from the sealed
@@ -172,8 +181,8 @@ def evaluate(env, contract):
 
 # --- mutation self-test: the detector must catch what it claims ---
 mut1 = dict(contract)
-mut1["vllm_canonical_argv"] = contract["vllm_canonical_argv"] + " --enable-prefix-caching"
-assert any("argv-equality" in f for f in evaluate(env, mut1)), \
+mut1["vllm_canonical_argv"] = contract["vllm_canonical_argv"] + " --enable-lora"
+assert any("argv-registered-cache-delta" in f for f in evaluate(env, mut1)), \
     "DETECTOR BROKEN: an extra unmeasured flag passed"
 mut2 = dict(env)
 mut2["WEINFER_PLACEMENT_PROFILES"] = "[]"
@@ -195,6 +204,20 @@ forged[0]["throughput_seed_kind"] = "measured_exact_identity"
 mut5["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(forged)
 assert any("bootstrap-seed-map" in f for f in evaluate(mut5, contract)), \
     "DETECTOR BROKEN: a bootstrap prior laundered itself as measured"
+mut6 = dict(env)
+mut6["VLLM_EXTRA_ARGS"] = env["VLLM_EXTRA_ARGS"].replace(
+    " --enable-prefix-caching", "")
+assert any("argv-registered-cache-delta" in f for f in evaluate(mut6, contract)), \
+    "DETECTOR BROKEN: missing declared prefix caching passed"
+mut7 = dict(env)
+mut7["VLLM_EXTRA_ARGS"] = env["VLLM_EXTRA_ARGS"] + " --enable-prefix-caching"
+assert any("argv-registered-cache-delta" in f for f in evaluate(mut7, contract)), \
+    "DETECTOR BROKEN: duplicate prefix caching declaration passed"
+mut8 = dict(env)
+mut8["VLLM_EXTRA_ARGS"] = env["VLLM_EXTRA_ARGS"].replace(
+    "--enable-prefix-caching", "--no-enable-prefix-caching")
+assert any("positive-prefix-cache-flag" in f for f in evaluate(mut8, contract)), \
+    "DETECTOR BROKEN: negative prefix caching declaration passed"
 
 fails = evaluate(env, contract)
 if fails:
@@ -204,5 +227,6 @@ if fails:
     sys.exit(1)
 print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities, no "
       "economic claim; typed ordering priors cannot become Measured facts; launch bytes "
-      "equal the frozen contract; detector self-test red")
+      "equal the frozen contract plus one registered positive cache flag; historical "
+      "effective cache state UNKNOWN; detector self-test red")
 PY

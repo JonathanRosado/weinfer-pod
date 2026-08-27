@@ -27,7 +27,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_metrics(self):
+        # Match vLLM 0.11's Prometheus WIRE, including the `_total`
+        # suffix added by prometheus_client.Counter.  The real worker
+        # refuses READY if this effective runtime observation is absent.
+        body = (
+            'vllm:cache_config_info{block_size="16",'
+            'enable_prefix_caching="True",engine="0"} 1.0\n'
+            'vllm:prefix_cache_queries_total{engine="0"} 0.0\n'
+            'vllm:prefix_cache_hits_total{engine="0"} 0.0\n'
+        ).encode()
+        self.send_response(200)
+        self.send_header("content-type", "text/plain; version=0.0.4")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
+        if self.path == "/metrics":
+            self._send_metrics()
+            return
         self._send({"object": "list",
                     "data": [{"id": "Qwen/Qwen2.5-7B-Instruct", "object": "model"}]})
 

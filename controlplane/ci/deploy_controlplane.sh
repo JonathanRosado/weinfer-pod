@@ -64,10 +64,10 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:4253de39fb3af01cc80735ae40aa6f9c215b2271ce38dfb2fa79a8746b7d19e1"
-GW_TAG="gateway-v0.15.0"
-GW_SHA="6063aa0bdb307f917025800771fddb6d083e2f65cc76dfc28adfbc30e7817cc7"
-WORKER_TAG="worker-v0.5.0"
-WORKER_SHA="422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
+GW_TAG="gateway-v0.16.0"
+GW_SHA="fc9456b8bf79eab98718b74c34baa0bdacdc42581aefadb40a7d2bcdcf58335d"
+WORKER_TAG="worker-v0.6.0"
+WORKER_SHA="0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
 QWEN_REV="a09a35458c702b33eeacc393d103063234e8bc28"
 
@@ -176,7 +176,7 @@ PY
 # sealed traversal.
 SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct"
 MAX_CTX=8192
-VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill"
+VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill --enable-prefix-caching"
 CONCURRENCY="64"
 ALLOC_CONF="expandable_segments:True"
 # Keep the JSON on one physical line: --render-env is also consumed as a
@@ -185,7 +185,7 @@ ALLOC_CONF="expandable_segments:True"
 BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":4000,"throughput_seed_kind":"policy_prior","throughput_seed_source":"bootstrap-policy-v1; no traffic observation"},{"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":2681,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed amort3full-1787755326; tps_low=2681; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 1/5 boots"},{"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":4161,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed batch-live-1787630415; tps_low=4161; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 2/5 boots"},{"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":4000,"throughput_seed_kind":"policy_prior","throughput_seed_source":"bootstrap-policy-v1; no traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":6000,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":6700,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48,"throughput_seed_tokens_per_sec":6500,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":13900,"throughput_seed_kind":"spec_derived","throughput_seed_source":"analytic-v1 FP16-compute extrapolation from sealed A4500 anchor; no traffic observation"},{"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48,"throughput_seed_tokens_per_sec":4000,"throughput_seed_kind":"policy_prior","throughput_seed_source":"bootstrap-policy-v1; no traffic observation"}]'
 
 # NO PLACEMENT PROFILES (codex 0164): the paid pair measured the
-# worker-v0.1.0 identity; production runs worker-v0.5.0 — a DIFFERENT
+# worker-v0.1.0 identity; production runs worker-v0.6.0 — a DIFFERENT
 # exact identity by the launch-contract digest's own authority.  The
 # available SKU therefore runs the explicit unmeasured-bootstrap path
 # with per-attempt live CUDA pinning, shared exact engine bytes, and

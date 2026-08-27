@@ -114,6 +114,13 @@ def main() -> int:
         "gpu_sku",
         "created_at_micros",
         "provider_created_at_micros",
+        "engine_cache_config_metric",
+        "engine_cache_config_digest",
+        "engine_prefix_queries_at_ready",
+        "engine_prefix_hits_at_ready",
+        "engine_prefix_queries_latest",
+        "engine_prefix_hits_latest",
+        "engine_cache_latest_at_micros",
         "ready_at_micros",
         "draining_at_micros",
         "terminate_requested_at_micros",
@@ -145,6 +152,13 @@ def main() -> int:
     required = [
         "provider_created_at_micros",
         "created_at_micros",
+        "engine_cache_config_metric",
+        "engine_cache_config_digest",
+        "engine_prefix_queries_at_ready",
+        "engine_prefix_hits_at_ready",
+        "engine_prefix_queries_latest",
+        "engine_prefix_hits_latest",
+        "engine_cache_latest_at_micros",
         "ready_at_micros",
         "draining_at_micros",
         "terminated_at_micros",
@@ -160,6 +174,13 @@ def main() -> int:
         raise Pending(f"missing batch lifecycle facts: {missing}")
     provider_created = int(invariants["provider_created_at_micros"])
     created = int(invariants["created_at_micros"])
+    cache_config_metric = str(invariants["engine_cache_config_metric"])
+    cache_config_digest = str(invariants["engine_cache_config_digest"])
+    cache_queries_at_ready = int(invariants["engine_prefix_queries_at_ready"])
+    cache_hits_at_ready = int(invariants["engine_prefix_hits_at_ready"])
+    cache_queries_latest = int(invariants["engine_prefix_queries_latest"])
+    cache_hits_latest = int(invariants["engine_prefix_hits_latest"])
+    cache_latest_at = int(invariants["engine_cache_latest_at_micros"])
     ready = int(invariants["ready_at_micros"])
     draining = int(invariants["draining_at_micros"])
     terminated = int(invariants["terminated_at_micros"])
@@ -177,6 +198,18 @@ def main() -> int:
         raise AssertionError((lifetime, terminated - provider_created, "lifetime mismatch"))
     if charge <= 0 or allocated != charge or provider_rate <= 0:
         raise AssertionError((charge, allocated, provider_rate, "cost does not conserve"))
+    if (
+        'enable_prefix_caching="True"' not in cache_config_metric
+        or hashlib.sha256(cache_config_metric.encode()).hexdigest()
+        != cache_config_digest
+        or not 0 <= cache_hits_at_ready <= cache_queries_at_ready
+        or not cache_queries_at_ready <= cache_queries_latest
+        or not cache_hits_at_ready <= cache_hits_latest <= cache_queries_latest
+        or cache_latest_at <= 0
+    ):
+        raise AssertionError("effective engine cache observation is incoherent")
+    cache_query_delta = cache_queries_latest - cache_queries_at_ready
+    cache_hit_delta = cache_hits_latest - cache_hits_at_ready
 
     total_prompt = 0
     total_completion = 0
@@ -372,6 +405,26 @@ def main() -> int:
             "active_window_tps_low": active_tps_low,
             "active_window_tps_high": active_tps_high,
             "failed_generations": failed_generations,
+            "engine_cache_observation": {
+                "authority": "vllm_loopback_metrics_observation_only",
+                "cache_config_metric": cache_config_metric,
+                "cache_config_digest": cache_config_digest,
+                "prefix_queries_at_ready": cache_queries_at_ready,
+                "prefix_hits_at_ready": cache_hits_at_ready,
+                "prefix_queries_latest": cache_queries_latest,
+                "prefix_hits_latest": cache_hits_latest,
+                "prefix_query_delta": cache_query_delta,
+                "prefix_hit_delta": cache_hit_delta,
+                "prefix_hit_fraction": (
+                    cache_hit_delta / cache_query_delta
+                    if cache_query_delta > 0
+                    else None
+                ),
+                "latest_at_micros": cache_latest_at,
+                "planner_input": False,
+                "promotion_input": False,
+                "pricing_input": False,
+            },
             "settlement_visibility_lag_micros": charged - terminated,
             "settlement_commit_micros": settled - charged,
         },
@@ -398,6 +451,11 @@ def main() -> int:
         "settlement_commit_micros": settled - charged,
         "promotion_eligible": promotion_eligible,
         "boot_samples_observed": len(boot_samples),
+        "engine_prefix_query_delta": cache_query_delta,
+        "engine_prefix_hit_delta": cache_hit_delta,
+        "engine_prefix_hit_fraction": (
+            cache_hit_delta / cache_query_delta if cache_query_delta > 0 else None
+        ),
     }
     atomic_json(snapshot / "profile_candidate.json", candidate)
     atomic_json(snapshot / "summary.json", summary)

@@ -16,8 +16,8 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.15.0
-  WORKER_TAG: worker-v0.5.0
+  GATEWAY_TAG: gateway-v0.16.0
+  WORKER_TAG: worker-v0.6.0
 
 jobs:
   build:
@@ -110,7 +110,7 @@ jobs:
           # binary and path production uses.
           MIGS=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM _sqlx_migrations WHERE success")
-          [ "$MIGS" -ge 43 ] || { echo "only $MIGS migrations applied"; exit 1; }
+          [ "$MIGS" -ge 44 ] || { echo "only $MIGS migrations applied"; exit 1; }
           # Both billing constraints are VALIDATED on the production path.
           VALIDATED=$(docker exec cp1 gosu postgres psql -h 127.0.0.1 -d weinfer -tAc \
             "SELECT COUNT(*) FROM pg_constraint WHERE conname IN ('quoted_money_shape','billed_tokens_travel_together') AND convalidated")
@@ -339,8 +339,8 @@ jobs:
           body = bodies[1]
           env = body["env"]
           assert env["WEINFER_GATEWAY_BASE"] == "https://fakecp-8080.proxy.runpod.net", env["WEINFER_GATEWAY_BASE"]
-          assert env["WEINFER_WORKER_SHA256"] == "422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
-          assert "worker-v0.5.0" in env["WEINFER_WORKER_URL"]
+          assert env["WEINFER_WORKER_SHA256"] == "0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
+          assert "worker-v0.6.0" in env["WEINFER_WORKER_URL"]
           assert body["image"].startswith("ghcr.io/jonathanrosado/weinfer-pod@sha256:160a9268")
           assert body["gpu"]["id"] == "NVIDIA RTX A4500", body["gpu"]
           assert body["gpu"]["allowedCudaVersions"] == ["12.8"], body["gpu"]
@@ -353,6 +353,7 @@ jobs:
           for flag, value in expected.items():
               assert args.count(flag) == 1, (flag, args)
               assert args[args.index(flag) + 1] == value, (flag, args)
+          assert args.count("--enable-prefix-caching") == 1, args
           print("CREATE PATH PROVEN: live-price A5000 bootstrap denied, same plan "
                 "fell through to A4500; per-SKU CUDA + exact launch provenance; "
                 "no measured identity claimed")

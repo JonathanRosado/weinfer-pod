@@ -11,6 +11,15 @@ import tempfile
 import threading
 import urllib.parse
 
+from prefix_cache_workloads import (
+    FROZEN_ANCHOR_WORKLOAD,
+    REALISTIC_AGENT_WORKLOAD,
+    REALISTIC_AGENT_WORKLOAD_SHA256,
+    cache_prediction,
+    workload,
+)
+from public_batch_canary import EXPECTED_WORKLOAD_SHA256, PARA
+
 
 ADMIN = "admin-regression"
 CUSTOMER = "customer-regression"
@@ -66,7 +75,7 @@ def launch_contract() -> tuple[dict, str, str, dict]:
         "tokenizer_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
         "image_digest": "ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613",
         "pod_args": "",
-        "vllm_canonical_args": "--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill --revision a09a35458c702b33eeacc393d103063234e8bc28 --tokenizer-revision a09a35458c702b33eeacc393d103063234e8bc28 --max-model-len 8192",
+        "vllm_canonical_args": "--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill --enable-prefix-caching --revision a09a35458c702b33eeacc393d103063234e8bc28 --tokenizer-revision a09a35458c702b33eeacc393d103063234e8bc28 --max-model-len 8192",
         "concurrency": "64",
         "allocator_config": "expandable_segments:True",
         "worker_sha256": "7bd6f06f07f68afb24bbd8fec086bf3be04d574ebe5a86791e9f2c230cca5f6b",
@@ -78,12 +87,22 @@ def launch_contract() -> tuple[dict, str, str, dict]:
     }
     raw = json.dumps(value, separators=(",", ":"))
     digest = hashlib.sha256(raw.encode()).hexdigest()
+    engine_contract = (
+        f"model={value['served_model']}\n"
+        f"image={value['image_digest']}\n"
+        f"pod_args={value['pod_args']}\n"
+        f"vllm={value['vllm_canonical_args']}\n"
+        f"concurrency={value['concurrency']}\n"
+        f"alloc={value['allocator_config']}\n"
+        f"worker_sha={value['worker_sha256']}\n"
+        f"cuda={','.join(value['cuda_pin'])}"
+    )
     identity = {
         "served_model": value["served_model"],
         "model_revision": value["model_revision"],
         "tokenizer_revision": value["tokenizer_revision"],
         "image_digest": value["image_digest"],
-        "engine_config_digest": "0846aa7e4989aa1ed918b8c0f0a529ee155337d1566df365e0bcc94413fdf82b",
+        "engine_config_digest": hashlib.sha256(engine_contract.encode()).hexdigest(),
         "gpu_sku": value["gpu_sku"],
         "cuda_class": value["cuda_class"],
     }
@@ -279,6 +298,10 @@ def profile_evidence(job_id: str) -> dict:
     idx = index_for(job_id)
     contract, raw, digest, identity = launch_contract()
     completed = 21_000_000 + idx * 300_000
+    cache_config_metric = (
+        'vllm:cache_config_info{block_size="16",'
+        'enable_prefix_caching="True",engine="0"} 1.0'
+    )
     evidence = {
         "job_id": job_id,
         "logical_response_id": job_id,
@@ -292,6 +315,15 @@ def profile_evidence(job_id: str) -> dict:
         "gpu_sku": "NVIDIA RTX A4500",
         "created_at_micros": 2_000_000,
         "provider_created_at_micros": 1_000_000,
+        "engine_cache_config_metric": cache_config_metric,
+        "engine_cache_config_digest": hashlib.sha256(
+            cache_config_metric.encode()
+        ).hexdigest(),
+        "engine_prefix_queries_at_ready": 0,
+        "engine_prefix_hits_at_ready": 0,
+        "engine_prefix_queries_latest": 1_188_000,
+        "engine_prefix_hits_latest": 0,
+        "engine_cache_latest_at_micros": 119_000_000,
         "ready_at_micros": 12_000_000,
         "completed_at_micros": completed,
         "draining_at_micros": 120_000_000,
@@ -328,6 +360,42 @@ def profile_evidence(job_id: str) -> dict:
 
 
 def run() -> None:
+    anchor_rows, anchor_blob = workload(FROZEN_ANCHOR_WORKLOAD)
+    agent_rows, agent_blob = workload(REALISTIC_AGENT_WORKLOAD)
+    assert hashlib.sha256(anchor_blob).hexdigest() == EXPECTED_WORKLOAD_SHA256
+    assert (
+        hashlib.sha256(agent_blob).hexdigest()
+        == REALISTIC_AGENT_WORKLOAD_SHA256
+    )
+    assert anchor_blob != agent_blob
+    for index, (anchor, agent) in enumerate(zip(anchor_rows, agent_rows, strict=True)):
+        anchor_content = anchor["messages"][0]["content"]
+        agent_content = agent["messages"][0]["content"]
+        assert anchor_content.startswith(f"Case {index:04d}.")
+        assert anchor_content.endswith(PARA * 55)
+        assert agent_content.startswith(PARA * 55)
+        assert agent_content.endswith(
+            f"Case {index:04d}. Read the operations context and answer in one "
+            "sentence: which single lever most reduces delivered cost?"
+        )
+        assert {
+            key: value for key, value in anchor.items() if key != "messages"
+        } == {key: value for key, value in agent.items() if key != "messages"}
+    anchor_prefix = os.path.commonprefix(
+        [row["messages"][0]["content"] for row in anchor_rows]
+    )
+    agent_prefix = os.path.commonprefix(
+        [row["messages"][0]["content"] for row in agent_rows]
+    )
+    assert len(anchor_prefix.encode()) < 16
+    assert agent_prefix.startswith(PARA * 55)
+    anchor_prediction = cache_prediction(FROZEN_ANCHOR_WORKLOAD)
+    agent_prediction = cache_prediction(REALISTIC_AGENT_WORKLOAD)
+    assert anchor_prediction["cross_request_hit_fraction_numerator"] == 0
+    assert agent_prediction["cacheable_common_prefix_tokens_per_warm_request"] == 3920
+    assert agent_prediction["cross_request_hit_fraction_numerator"] == 299 * 3920
+    assert agent_prediction["cross_request_hit_fraction_denominator"] == 300 * 3960
+
     with tempfile.TemporaryDirectory(prefix="weinfer-public-batch-") as temp:
         root = Path(temp)
         credentials = root / "credentials.env"
@@ -349,6 +417,25 @@ def run() -> None:
                 "BATCH_POLL_BUDGET_SECONDS": "2400",
             }
         )
+        _, _, _, current_identity = launch_contract()
+        prior_path = root / "same-identity-prior.json"
+        prior_path.write_text(
+            json.dumps(
+                {
+                    "profile_facts": {"identity": current_identity},
+                    "derivation": {
+                        "batch_run_id": "regression-prior",
+                        "activation_micros": 10_000_000,
+                        "boot_samples_micros": [9_000_000, 10_000_000],
+                        "boot_sample_sources": [
+                            "regression-prior-a",
+                            "regression-prior-b",
+                        ],
+                    },
+                }
+            )
+        )
+        env["BATCH_PRIOR_PROFILE"] = str(prior_path)
         first = subprocess.run(
             ["bash", "scripts/public_batch_canary.sh", base, str(credentials)],
             env=env,
@@ -494,9 +581,76 @@ def run() -> None:
         assert typed_rows[0]["error_code"] == "model_not_found"
         assert typed_rows[0]["retrying"] is False
         assert STATE.typed_missing_model_calls == 1
+
+        # The realistic series uses the proven customer client through a
+        # SEPARATE entrypoint, so the hash-pinned frozen client remains
+        # byte-identical for the armed retention experiment.
+        with STATE.lock:
+            STATE.credits = 0
+            STATE.reserved = 0
+            STATE.spent = 0
+            STATE.grants.clear()
+            STATE.jobs.clear()
+            STATE.idempotency.clear()
+            STATE.new_jobs = 0
+            STATE.poll_started = False
+            STATE.job_post_calls = 0
+            STATE.transient_job_404s.clear()
+            STATE.typed_missing_model_calls = 0
+        agent_artifacts = root / "agent-artifacts"
+        agent_env = env.copy()
+        agent_env.update(
+            {
+                "BATCH_RUN_ID": "regression-agent-1",
+                "BATCH_ARTIFACT_DIR": str(agent_artifacts),
+                "BATCH_KEY_STORE_ROOT": str(root / "agent-keys"),
+            }
+        )
+        agent_run = subprocess.run(
+            [
+                "python3",
+                "scripts/realistic_agent_batch_canary.py",
+                base,
+                str(credentials),
+            ],
+            env=agent_env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if agent_run.returncode != 0:
+            raise SystemExit(agent_run.stdout + agent_run.stderr)
+        agent_pointer = json.loads((agent_artifacts / "run.json").read_text())
+        agent_result = json.loads(
+            (Path(agent_pointer["latest_observation"]) / "result.json").read_text()
+        )
+        assert agent_result["workload_variant"] == REALISTIC_AGENT_WORKLOAD
+        assert agent_result["workload_sha256"] == REALISTIC_AGENT_WORKLOAD_SHA256
+        assert agent_result["continuity_anchor"] is False
+        assert (
+            agent_result["cache_prediction"][
+                "cross_request_hit_fraction_numerator"
+            ]
+            == 299 * 3920
+        )
+        contract_doc = json.loads(
+            (agent_artifacts / "workload-contract.json").read_text()
+        )
+        assert "MUST NOT" in contract_doc["comparison_rule"]
+        assert next(iter(STATE.jobs.values()))["request"]["messages"][0][
+            "content"
+        ].startswith(PARA * 55)
+        assert STATE.new_jobs == N
+        # Re-prove the frozen dependency after exercising the new entrypoint.
+        assert hashlib.sha256(
+            Path("scripts/public_batch_canary.py").read_bytes()
+        ).hexdigest() == "25a8f999b112710e831b806db59422248ab2ba393dec61acfd7c134221c1ac02"
         server.shutdown()
         thread.join(timeout=5)
-        print("PUBLIC BATCH REGRESSION PASS: 300 accepted/completed, replay exact, pagination exact, profile conserved")
+        print(
+            "PUBLIC BATCH REGRESSION PASS: frozen 300 accepted/completed, "
+            "realistic 300 isolated, replay exact, pagination exact, profile conserved"
+        )
 
 
 if __name__ == "__main__":
