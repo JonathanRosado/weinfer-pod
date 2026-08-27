@@ -388,7 +388,21 @@ jobs:
           assert e["job_state"] == "completed" and e["pod_state"] == "ready", e
           assert e["provider_rate_micro_per_hour"] == 190000, e
           assert len(e["attempts"]) == 1 and e["attempts"][0]["billable"] is True, e
-          assert c["worker_sha256"] == "422da6aae184387c3312ef98d6bbb1f6dc4506f758e09852d2614c9d24833457"
+          assert c["worker_sha256"] == "0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
+          cache_metric = e["engine_cache_config_metric"]
+          assert 'enable_prefix_caching="True"' in cache_metric, cache_metric
+          assert hashlib.sha256(cache_metric.encode()).hexdigest() \
+              == e["engine_cache_config_digest"], e
+          cache_counters = (
+              e["engine_prefix_queries_at_ready"],
+              e["engine_prefix_hits_at_ready"],
+              e["engine_prefix_queries_latest"],
+              e["engine_prefix_hits_latest"],
+          )
+          q_ready, h_ready, q_latest, h_latest = cache_counters
+          assert 0 <= h_ready <= q_ready <= q_latest, cache_counters
+          assert h_ready <= h_latest <= q_latest, cache_counters
+          assert e["engine_cache_latest_at_micros"] > 0, e
           timing = {
               key: e[key] for key in (
                   "worker_process_started_wall_micros",
@@ -417,7 +431,7 @@ jobs:
           assert sum(wall_phases) == ready - provider_created, (wall_phases, e)
           assert c["max_context_tokens"] == 8192 and c["gpu_sku"] == "NVIDIA RTX A4500", c
           assert hashlib.sha256(e["launch_contract"].encode()).hexdigest() == raw["launch_contract_digest"]
-          print("IMMUTABLE PROFILE INPUTS PROVEN: contract + rate + attempt-exact usage + conserving boot phases")
+          print("IMMUTABLE PROFILE INPUTS PROVEN: contract + rate + attempt-exact usage + conserving boot phases + effective prefix caching")
           PYEOF
           # Retry of ci1: replays the COMPLETED state (settled ledger,
           # conservation) without minting a key or double-funding.
