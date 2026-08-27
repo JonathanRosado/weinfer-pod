@@ -71,8 +71,10 @@ def main() -> int:
     ):
         raise RuntimeError("batch result is incomplete or carries workload drift")
 
+    out_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(out_root, 0o700)
     admin_key = parse_admin_key(Path(credentials))
-    client = Client(base)
+    client = Client(base, out_root / "http_failures.jsonl")
     records_by_job: dict[str, dict[str, Any]] = {}
 
     def fetch(job_id: str) -> tuple[str, dict[str, Any]]:
@@ -90,8 +92,6 @@ def main() -> int:
                 print(f"profile evidence {done}/{EXPECTED_JOBS}", flush=True)
     records = [records_by_job[job_id] for job_id in job_ids]
 
-    out_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(out_root, 0o700)
     snapshot = out_root / f"observation-{time.time_ns()}"
     snapshot.mkdir(mode=0o700)
     raw_name = "raw_profile_evidence.jsonl"

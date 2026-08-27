@@ -217,6 +217,11 @@ class Client:
                 and (
                     (method == "POST" and path == "/v1/jobs")
                     or (method == "GET" and path.startswith("/v1/jobs/"))
+                    or (
+                        method == "GET"
+                        and path.startswith("/admin/jobs/")
+                        and path.endswith("/profile-evidence")
+                    )
                 )
             )
             retrying = (

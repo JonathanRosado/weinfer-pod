@@ -44,8 +44,10 @@ class State:
         self.job_post_calls = 0
         self.transient_job_404s: set[str] = set()
         self.transient_job_poll_404s: set[str] = set()
+        self.transient_profile_404s: set[str] = set()
         self.typed_missing_model_calls = 0
         self.typed_missing_job_calls = 0
+        self.typed_missing_profile_calls = 0
 
     def balance(self) -> dict:
         return {
@@ -274,7 +276,25 @@ class Handler(BaseHTTPRequestHandler):
             job_id = self.path.split("/")[3]
             with STATE.lock:
                 if job_id not in STATE.jobs:
-                    return self.send_json(404, {"error": {"message": "not found"}})
+                    STATE.typed_missing_profile_calls += 1
+                    return self.send_json(
+                        404,
+                        {
+                            "error": {
+                                "type": "profile_evidence_not_found",
+                                "code": "profile_evidence_not_found",
+                                "message": "profile evidence is not present",
+                                "param": None,
+                            }
+                        },
+                    )
+                if job_id not in STATE.transient_profile_404s:
+                    STATE.transient_profile_404s.add(job_id)
+                    self.send_response(404)
+                    self.send_header("content-type", "text/plain")
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                    return
                 return self.send_json(200, profile_evidence(job_id))
         return self.send_json(404, {"error": {"message": "not found"}})
 
@@ -482,6 +502,22 @@ def run() -> None:
         )
         if collected.returncode != 0:
             raise SystemExit(collected.stdout + collected.stderr)
+        profile_http_failures = [
+            json.loads(line)
+            for line in (candidate_root / "http_failures.jsonl").read_text().splitlines()
+        ]
+        assert len(profile_http_failures) == N
+        assert all(
+            row["status"] == 404
+            and row["method"] == "GET"
+            and row["path"].startswith("/admin/jobs/")
+            and row["path"].endswith("/profile-evidence")
+            and row["typed_weinfer_error"] is False
+            and row["retrying"] is True
+            and row["payload_sha256"] == hashlib.sha256(b"").hexdigest()
+            and row["payload_base64"] == ""
+            for row in profile_http_failures
+        )
         second = subprocess.run(
             ["bash", "scripts/public_batch_canary.sh", base, str(credentials)],
             env=env,
@@ -644,6 +680,33 @@ def run() -> None:
         assert typed_poll_rows[0]["retrying"] is False
         assert STATE.typed_missing_job_calls == 1
 
+        typed_profile_log = root / "typed-profile-http-failures.jsonl"
+        typed_profile_client = Client(base, typed_profile_log)
+        try:
+            typed_profile_client.request(
+                "GET",
+                "/admin/jobs/does-not-exist/profile-evidence",
+                bearer=ADMIN,
+            )
+        except HttpFailure as error:
+            assert error.status == 404
+            assert "profile evidence is not present" in str(error)
+        else:
+            raise AssertionError(
+                "typed profile_evidence_not_found was retried or accepted"
+            )
+        typed_profile_rows = [
+            json.loads(line) for line in typed_profile_log.read_text().splitlines()
+        ]
+        assert len(typed_profile_rows) == 1
+        assert typed_profile_rows[0]["typed_weinfer_error"] is True
+        assert (
+            typed_profile_rows[0]["error_code"]
+            == "profile_evidence_not_found"
+        )
+        assert typed_profile_rows[0]["retrying"] is False
+        assert STATE.typed_missing_profile_calls == 1
+
         # The realistic series uses the proven customer client through a
         # SEPARATE entrypoint, so the hash-pinned frozen client remains
         # byte-identical for the armed retention experiment.
@@ -659,8 +722,10 @@ def run() -> None:
             STATE.job_post_calls = 0
             STATE.transient_job_404s.clear()
             STATE.transient_job_poll_404s.clear()
+            STATE.transient_profile_404s.clear()
             STATE.typed_missing_model_calls = 0
             STATE.typed_missing_job_calls = 0
+            STATE.typed_missing_profile_calls = 0
         agent_artifacts = root / "agent-artifacts"
         agent_env = env.copy()
         agent_env.update(
@@ -708,7 +773,7 @@ def run() -> None:
         # Re-prove the frozen dependency after exercising the new entrypoint.
         assert hashlib.sha256(
             Path("scripts/public_batch_canary.py").read_bytes()
-        ).hexdigest() == "2740c00edc45e6235f8723cfac960762b020a69745ac931fddbbae60242d4cd4"
+        ).hexdigest() == "9e785575e52e3abe104dd65403852c219cbd7a1e2fb8901779376fd7c0642e6a"
         server.shutdown()
         thread.join(timeout=5)
         print(
