@@ -212,10 +212,12 @@ class Client:
                     raise RuntimeError(f"non-JSON success for {path}") from error
             typed, detail, error_code = self.typed_weinfer_error(payload)
             transient_proxy_404 = (
-                method == "POST"
-                and path == "/v1/jobs"
-                and status_code == 404
+                status_code == 404
                 and not typed
+                and (
+                    (method == "POST" and path == "/v1/jobs")
+                    or (method == "GET" and path.startswith("/v1/jobs/"))
+                )
             )
             retrying = (
                 status_code in (408, 500, 502, 503, 504) or transient_proxy_404
