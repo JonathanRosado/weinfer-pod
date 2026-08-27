@@ -37,6 +37,32 @@ if not raw.isascii() or not raw.isdigit() or int(raw) <= 0:
     )
 PY
 
+# Cold-start amortization target. Production keeps the shipped 20% default;
+# a registered deep-backlog measurement may lower it so the full intended
+# backlog is durably visible before acquisition. This affects only the cold
+# BootForBacklog threshold. Validate before any trust-root or provider work.
+BOOT_FRACTION="${WEINFER_BOOT_FRACTION:-0.2}"
+python3 - "$BOOT_FRACTION" <<'PY'
+from decimal import Decimal, InvalidOperation
+import sys
+
+raw = sys.argv[1]
+try:
+    value = Decimal(raw)
+except InvalidOperation:
+    raise SystemExit(
+        f"WEINFER_BOOT_FRACTION must be a finite decimal strictly inside (0, 1), got {raw!r}"
+    )
+if not value.is_finite() or not (Decimal(0) < value < Decimal(1)):
+    raise SystemExit(
+        f"WEINFER_BOOT_FRACTION must be a finite decimal strictly inside (0, 1), got {raw!r}"
+    )
+PY
+# Freeze the other two inputs to the cold-backlog threshold explicitly rather
+# than inheriting binary defaults that a future release could change silently.
+POLICY_BOOT_SEED_SECS="452"
+POLICY_TOKENS_PER_SEC="4000"
+
 KEY_FILE="../rig/scaffold/runpod_account_a.txt"
 DEPLOY_TEST="${WEINFER_DEPLOY_TEST:-0}"
 if [ "$RENDER_ONLY" = "0" ] && [ "$DEPLOY_TEST" = "0" ]; then
@@ -64,8 +90,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:693db10834a098d0267949098edc334593c5e418c3f8e6b5b944ee41d5b741de"
-GW_TAG="gateway-v0.17.0"
-GW_SHA="3ff9bc7de2b3654a9c75376b7168cd2f4461108bef7585faa27327d4c4b9f397"
+GW_TAG="gateway-v0.18.0"
+GW_SHA="5b43c6ae6cc14c3a0d1eb894957e185dba237b924b074d0af8611480326572d2"
 WORKER_TAG="worker-v0.6.0"
 WORKER_SHA="0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -230,6 +256,9 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   CONCURRENCY="$CONCURRENCY" ALLOC_CONF="$ALLOC_CONF" \
   BOOTSTRAP_HARDWARE="$BOOTSTRAP_HARDWARE" \
   DEMAND_QUIET_CYCLES="$DEMAND_QUIET_CYCLES" \
+  BOOT_FRACTION="$BOOT_FRACTION" \
+  POLICY_BOOT_SEED_SECS="$POLICY_BOOT_SEED_SECS" \
+  POLICY_TOKENS_PER_SEC="$POLICY_TOKENS_PER_SEC" \
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -247,6 +276,11 @@ env = {
     # observations.  The registered A/B control may raise this value until
     # the gateway's one-boot parity cap becomes the effective TTL.
     "WEINFER_DEMAND_QUIET_CYCLES": e["DEMAND_QUIET_CYCLES"],
+    # Cold-pod backlog trigger only. Production is 0.2; registered deep-
+    # backlog measurements must record any override as an explicit variable.
+    "WEINFER_BOOT_FRACTION": e["BOOT_FRACTION"],
+    "WEINFER_BOOT_SEED_SECS": e["POLICY_BOOT_SEED_SECS"],
+    "WEINFER_POOL_TPS": e["POLICY_TOKENS_PER_SEC"],
     "WEINFER_RUNPOD_API_KEY": e["RP_KEY"],
     "WEINFER_WORKER_KEYS": e["WORKER_RING"],
     "WEINFER_WORKER_URL": e["WORKER_URL"],
@@ -513,6 +547,8 @@ echo "  pod:          ${POD_ID} (\$${POD_RATE:-?}/hr; ceiling \$${CEILING_CPU_US
 echo "  volume:       ${VOL_ID} (${VOLUME_GB}GB, durable)"
 echo "  credentials:  ${CRED_FILE}"
 echo "  retention:    demand_quiet_cycles=${DEMAND_QUIET_CYCLES}"
+echo "  cold target:  boot_fraction=${BOOT_FRACTION}"
+echo "  cold inputs:  boot_seed=${POLICY_BOOT_SEED_SECS}s policy_tps=${POLICY_TOKENS_PER_SEC}"
 echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + volume ~\$0.70/mo — founder-visible, deliberate"
 echo
 echo "next: scripts/canary_traversal.sh ${PUBLIC_BASE} ${CRED_FILE}"

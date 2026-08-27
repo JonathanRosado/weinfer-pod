@@ -56,6 +56,8 @@ MAX_RATE_USD_HR="${WEINFER_MAX_GPU_RATE:-0.40}"   # fail-closed accrual rate
 STANDDOWN_FILE="${WEINFER_WATCHDOG_STANDDOWN_FILE:-}"
 CAMPAIGN_SECONDS="${WEINFER_WATCHDOG_CAMPAIGN_SECONDS:?campaign seconds required}"
 CONTROL_PID="${WEINFER_WATCHDOG_CONTROL_PID:-}"
+CONTROL_TELEMETRY_FILE="${WEINFER_WATCHDOG_CONTROL_TELEMETRY_FILE:-}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 require_launchd_observer() {
   if [ "${WEINFER_WATCHDOG_ALLOW_UNMANAGED:-}" = "1" ]; then
@@ -96,6 +98,12 @@ auth() { tr -d '[:space:]' < "$KEY_FILE"; }
 list_pods() {
   curl -fsS --connect-timeout 10 --max-time 30 "$API/pods" \
     -H "Authorization: Bearer $(auth)"
+}
+
+record_control_telemetry() { # pods-json; observation-only, never spend authority
+  [ -z "$CONTROL_TELEMETRY_FILE" ] && return 0
+  printf '%s' "$1" | python3 "$SCRIPT_DIR/controlplane_telemetry.py" \
+    "$CONTROL_POD" "$CONTROL_TELEMETRY_FILE"
 }
 
 # The provider's collection endpoint can omit a recently terminated
@@ -348,6 +356,9 @@ while :; do
     breach
   fi
   if LISTING=$(list_pods); then
+    record_control_telemetry "$LISTING" || {
+      echo "[watchdog] control-plane utilization observation unavailable; spend survey continues independently" >&2
+    }
     LISTING=$(reconcile_missing "$LISTING") || {
       FAILS=$((FAILS + 1))
       echo "[watchdog] missing-pod reconciliation FAILED — retrying, never under-booking" >&2

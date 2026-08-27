@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.17.0
+  GATEWAY_TAG: gateway-v0.18.0
   WORKER_TAG: worker-v0.6.0
 
 jobs:
@@ -229,6 +229,14 @@ jobs:
           BATCH_PRIOR_PROFILE=ci/public_batch_prior_profile.json \
             bash controlplane/ci/public_batch_canary_regression.sh
           rm controlplane/scripts
+      - name: N24 observation and one-shot contracts
+        run: |
+          test ! -e controlplane/scripts
+          trap 'rm -f controlplane/scripts' EXIT
+          ln -s ci controlplane/scripts
+          python3 controlplane/ci/controlplane_telemetry_regression.py
+          python3 controlplane/ci/stacked_n24_admit_regression.py
+          python3 controlplane/ci/stacked_n24_identity_regression.py
       - name: one-shot retention window contract
         run: |
           test ! -e controlplane/scripts

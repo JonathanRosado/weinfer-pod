@@ -540,6 +540,9 @@ def run() -> None:
             "2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205"
         )
         assert first_result["accepted_reservation_micro_usd"] == 253_800
+        assert first_result["submit_concurrency"] == 16
+        assert first_result["poll_concurrency"] == 32
+        assert first_result["poll_interval_seconds"] == 10
         assert first_result["billable_tokens"] == 300 * (3960 + 4)
         assert first_result["customer_charge_micro_usd"] == N * CHARGE
         first_http_failures = [
@@ -773,7 +776,7 @@ def run() -> None:
         # Re-prove the frozen dependency after exercising the new entrypoint.
         assert hashlib.sha256(
             Path("scripts/public_batch_canary.py").read_bytes()
-        ).hexdigest() == "9e785575e52e3abe104dd65403852c219cbd7a1e2fb8901779376fd7c0642e6a"
+        ).hexdigest() == "b2df58252a2333ffa58bcf6bb7227ef7e969f67d7a2bbccc7e0250b1af076cdd"
         server.shutdown()
         thread.join(timeout=5)
         print(

@@ -305,10 +305,13 @@ def main() -> int:
     )
     submit_workers = int(os.environ.get("BATCH_SUBMIT_CONCURRENCY", "16"))
     poll_workers = int(os.environ.get("BATCH_POLL_CONCURRENCY", "32"))
+    poll_interval_seconds = int(os.environ.get("BATCH_POLL_INTERVAL_SECONDS", "10"))
     if deadline_seconds < 1 or poll_budget_seconds < deadline_seconds:
         raise SystemExit("deadline/poll budget invalid")
     if not 1 <= submit_workers <= 64 or not 1 <= poll_workers <= 64:
         raise SystemExit("batch concurrency must be within 1..64")
+    if not 1 <= poll_interval_seconds <= 600:
+        raise SystemExit("batch poll interval must be within 1..600 seconds")
 
     artifact_root = Path(
         os.environ.get(
@@ -520,7 +523,7 @@ def main() -> int:
             flush=True,
         )
         if pending:
-            time.sleep(10)
+            time.sleep(poll_interval_seconds)
     completed_at = time.time_ns() // 1_000
     if pending:
         atomic_json(observation / "failure.json", {"reason": "poll timeout", "pending": sorted(pending)})
@@ -623,6 +626,9 @@ def main() -> int:
         "accepted_jobs": N_JOBS,
         "completed_jobs": N_JOBS,
         "deadline_seconds": deadline_seconds,
+        "submit_concurrency": submit_workers,
+        "poll_concurrency": poll_workers,
+        "poll_interval_seconds": poll_interval_seconds,
         "expected_hold_per_job_micro_usd": EXPECTED_HOLD_PER_JOB,
         "accepted_reservation_micro_usd": EXPECTED_HOLD_PER_JOB * N_JOBS,
         "prompt_tokens": total_prompt,

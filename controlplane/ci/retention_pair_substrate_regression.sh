@@ -21,7 +21,7 @@ import json
 import sys
 
 value = json.load(open(sys.argv[1]))
-assert value["WEINFER_GATEWAY_SHA256"] == "3ff9bc7de2b3654a9c75376b7168cd2f4461108bef7585faa27327d4c4b9f397"
+assert value["WEINFER_GATEWAY_SHA256"] == "5b43c6ae6cc14c3a0d1eb894957e185dba237b924b074d0af8611480326572d2"
 assert value["WEINFER_BOOTSTRAP_MODE"] == "1"
 hardware = json.loads(value["WEINFER_BOOTSTRAP_HARDWARE"])
 assert len(hardware) == 9
@@ -42,7 +42,7 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-text = text.replace('GW_TAG="gateway-v0.9.0"', 'GW_TAG="gateway-v0.17.0"', 1)
+text = text.replace('GW_TAG="gateway-v0.9.0"', 'GW_TAG="gateway-v0.18.0"', 1)
 path.write_text(text)
 PY
 if bash "$PREFLIGHT" "$test_tmp/tampered.sh" > "$test_tmp/tampered.out" 2> "$test_tmp/tampered.err"; then
@@ -51,4 +51,4 @@ if bash "$PREFLIGHT" "$test_tmp/tampered.sh" > "$test_tmp/tampered.out" 2> "$tes
 fi
 grep -q 'retention substrate refused: deploy sha' "$test_tmp/tampered.err"
 
-echo "RETENTION SUBSTRATE REGRESSION PASS: frozen v0.9/A4500 accepted; live v0.17/multi-SKU and tamper refused"
+echo "RETENTION SUBSTRATE REGRESSION PASS: frozen v0.9/A4500 accepted; live v0.18/multi-SKU and tamper refused"

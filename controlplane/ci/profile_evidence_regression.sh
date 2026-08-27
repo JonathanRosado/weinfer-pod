@@ -36,6 +36,45 @@ GOT_SHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'
 ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env.json
 
+# A deep-backlog measurement may lower only the cold-start amortization
+# target. The rendered environment must expose that one registered delta and
+# preserve every other production byte.
+ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOT_FRACTION=0.04 \
+  bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env-boot004.json
+
+python3 - <<'PY'
+import json
+
+default = json.load(open("/tmp/evidence-env.json"))
+deep = json.load(open("/tmp/evidence-env-boot004.json"))
+assert default["WEINFER_BOOT_FRACTION"] == "0.2", default
+assert deep["WEINFER_BOOT_FRACTION"] == "0.04", deep
+assert default["WEINFER_BOOT_SEED_SECS"] == "452", default
+assert deep["WEINFER_BOOT_SEED_SECS"] == "452", deep
+assert default["WEINFER_POOL_TPS"] == "4000", default
+assert deep["WEINFER_POOL_TPS"] == "4000", deep
+assert {
+    key for key in set(default) | set(deep)
+    if default.get(key) != deep.get(key)
+} == {"WEINFER_BOOT_FRACTION"}, (default, deep)
+PY
+
+for invalid_boot_fraction in 0 1 nan; do
+  if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+    WEINFER_BOOT_FRACTION="$invalid_boot_fraction" \
+    bash "$DEPLOY_SCRIPT" --render-env \
+      >/tmp/evidence-env-boot-invalid.json \
+      2>/tmp/evidence-env-boot-invalid.log; then
+    echo "PROFILE EVIDENCE REGRESSION FAIL: invalid boot fraction passed: ${invalid_boot_fraction}" >&2
+    exit 1
+  fi
+  grep -q "strictly inside (0, 1)" /tmp/evidence-env-boot-invalid.log || {
+    echo "PROFILE EVIDENCE REGRESSION FAIL: invalid boot fraction lacked named refusal" >&2
+    exit 1
+  }
+done
+
 # The paid exact-identity selector may only narrow the default queue. It must
 # preserve the selected row's typed prior/provenance exactly and may not forge
 # a tenth identity. This render is zero-provider and never reads the real key.
@@ -126,6 +165,13 @@ def evaluate(env, contract):
               f"profiles claim Measured facts but production worker {prod_worker[:12]} "
               f"!= measured worker {measured_worker[:12]} — a different exact identity")
     check("bootstrap-mode", env.get("WEINFER_BOOTSTRAP_MODE") == "1")
+    check("production-boot-fraction",
+          env.get("WEINFER_BOOT_FRACTION") == "0.2",
+          "ordinary production must retain the shipped 20% cold-start target")
+    check("cold-threshold-inputs",
+          env.get("WEINFER_BOOT_SEED_SECS") == "452"
+          and env.get("WEINFER_POOL_TPS") == "4000",
+          "the cold threshold's boot and throughput inputs must be explicit")
     try:
         bootstrap = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
     except Exception as error:
@@ -482,7 +528,9 @@ print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities
       "economic claim; scored ready-window calibration preserves all candidates and "
       "an observed leader at delivered-token proxies and live estimated backlogs for "
       "1/3/12/24 batches; independent typed throughput/fixed-cost "
-      "priors cannot become Measured facts or deadline authority; launch bytes "
+      "priors cannot become Measured facts or deadline authority; production boot "
+      "fraction 0.2 and the "
+      "single-variable 0.04 deep-backlog render are exact; launch bytes "
       "equal the frozen contract plus one registered positive cache flag; historical "
       "effective cache state UNKNOWN; detector self-test red")
 PY
