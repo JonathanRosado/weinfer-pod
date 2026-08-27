@@ -29,6 +29,10 @@
 # confirmed three times.  A run-scoped stand-down file requests the
 # SAME CP-first/three-read closeout but exits 0 and labels it as an
 # intentional campaign end rather than a breach.  Runs forever otherwise.
+# Persistent observers MUST be launched by a com.weinfer.* launchd job.
+# A wrapped command can reap a nohup child while leaving an operator with a
+# false belief that the spend ceiling is live.  The unmanaged escape hatch is
+# reserved for the regression harness, whose process lifetime it controls.
 set -uo pipefail
 
 KEY_FILE="${1:?key file required}"
@@ -42,6 +46,18 @@ API="${WEINFER_RUNPOD_API:-https://api.runpod.io/v2}"
 MAX_RATE_USD_HR="${WEINFER_MAX_GPU_RATE:-0.40}"   # fail-closed accrual rate
 STANDDOWN_FILE="${WEINFER_WATCHDOG_STANDDOWN_FILE:-}"
 
+require_launchd_observer() {
+  if [ "${WEINFER_WATCHDOG_ALLOW_UNMANAGED:-}" = "1" ]; then
+    return 0
+  fi
+  case "${XPC_SERVICE_NAME:-}" in
+    com.weinfer.*) return 0 ;;
+  esac
+  echo "WATCHDOG ARM REFUSED: persistent spend observers require a com.weinfer.* launchd job; direct/nohup invocation cannot prove observer lifetime" >&2
+  exit 1
+}
+
+require_launchd_observer
 [ -f "$KEY_FILE" ] || { echo "key file missing" >&2; exit 1; }
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 

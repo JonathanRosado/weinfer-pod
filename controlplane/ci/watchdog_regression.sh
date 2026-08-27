@@ -20,6 +20,56 @@ sleep 1
 rm -f /tmp/fake-official-deletes.log /tmp/wd-state.json /tmp/wd.log
 printf 'fake-key' > /tmp/wd-key
 
+# --- Arming contract: persistent observers are launchd-only --------
+# An interactive shell on macOS can inherit XPC_SERVICE_NAME=0, so a mere
+# nonempty check is decorative.  Both absent and literal-zero contexts must
+# refuse before creating state or printing an armed banner.
+assert_unmanaged_refused() {
+  local observer="$1" name="$2" state="/tmp/wd-arm-${2}.json" log="/tmp/wd-arm-${2}.log"
+  shift 2
+  rm -f "$state" "$log"
+  set +e
+  env -u WEINFER_WATCHDOG_ALLOW_UNMANAGED "$@" \
+    bash "$observer" /tmp/wd-key "$(date +%s)" 1.00 "$PREFIX" cp-none "$state" \
+    > "$log" 2>&1
+  local code=$?
+  set -e
+  [ "$code" -ne 0 ] || { echo "FAIL: unmanaged ${name} observer armed"; exit 1; }
+  [ ! -e "$state" ] || { echo "FAIL: refused ${name} observer created state"; exit 1; }
+  grep -q 'WATCHDOG ARM REFUSED' "$log" || {
+    echo "FAIL: ${name} refusal was not explicit"; cat "$log"; exit 1;
+  }
+  ! grep -q '\[watchdog\] armed:' "$log" || {
+    echo "FAIL: refused ${name} observer claimed to be armed"; cat "$log"; exit 1;
+  }
+}
+
+assert_unmanaged_refused "$WATCHDOG" short-env-absent env -u XPC_SERVICE_NAME
+assert_unmanaged_refused "$WATCHDOG" short-env-zero env XPC_SERVICE_NAME=0
+assert_unmanaged_refused "$CAMPAIGN_WATCHDOG" campaign-env-zero \
+  env XPC_SERVICE_NAME=0 WEINFER_WATCHDOG_CAMPAIGN_SECONDS=30
+
+# A launchd-shaped label passes the contract and reaches the ordinary loop.
+rm -f /tmp/wd-arm-launchd.json /tmp/wd-arm-launchd.log
+XPC_SERVICE_NAME=com.weinfer.test.watchdog \
+  WEINFER_RUNPOD_API="http://127.0.0.1:${PORT}/v2" WEINFER_WATCHDOG_INTERVAL=1 \
+  bash "$WATCHDOG" /tmp/wd-key "$(date +%s)" 5.00 "$PREFIX" cp-none \
+    /tmp/wd-arm-launchd.json > /tmp/wd-arm-launchd.log 2>&1 & ARM_PID=$!
+for i in $(seq 1 20); do
+  grep -q '\[watchdog\] armed:' /tmp/wd-arm-launchd.log 2>/dev/null && break
+  [ "$i" = 20 ] && {
+    echo "FAIL: launchd-shaped observer never armed"; cat /tmp/wd-arm-launchd.log; exit 1;
+  }
+  sleep 1
+done
+kill "$ARM_PID" 2>/dev/null; wait "$ARM_PID" 2>/dev/null || true
+[ -f /tmp/wd-arm-launchd.json ] || { echo "FAIL: armed observer created no state"; exit 1; }
+echo "ok: observer arming — absent/zero XPC refused pre-state; com.weinfer launchd accepted"
+
+# The remaining scenarios own every child lifetime explicitly; this escape
+# hatch exists only so the regression can exercise the observer loop directly.
+export WEINFER_WATCHDOG_ALLOW_UNMANAGED=1
+
 spawn() { curl -fsS -X POST "$CTRL/spawn" -d "$1" >/dev/null; }
 kill_pod() { curl -fsS -X POST "$CTRL/kill" -d "{\"id\":\"$1\"}" >/dev/null; }
 

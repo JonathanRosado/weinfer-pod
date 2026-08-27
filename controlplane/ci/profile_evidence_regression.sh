@@ -7,8 +7,9 @@
 # digest's own authority.  Therefore:
 #   (1) the rendered deployment must carry NO measured placement
 #       profile; its explicit hardware queue may carry only identity
-#       plus a typed hypothesis-only throughput PRIOR — never
-#       tps_low/high, boot, rate, facts, or promotion evidence;
+#       plus independent typed hypothesis-only throughput and fixed-cost
+#       PRIORS — never tps_low/high, promoted boot, rate, facts, or
+#       promotion evidence;
 #   (2) the engine-side launch bytes may differ from the frozen run by
 #       EXACTLY one registered product change: the positive valueless
 #       --enable-prefix-caching flag. Historical effective cache state
@@ -34,6 +35,47 @@ GOT_SHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'
 
 ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env.json
+
+# The paid exact-identity selector may only narrow the default queue. It must
+# preserve the selected row's typed prior/provenance exactly and may not forge
+# a tenth identity. This render is zero-provider and never reads the real key.
+ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 4090" \
+  bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env-4090.json
+
+python3 - <<'PY'
+import json
+
+default = json.load(open("/tmp/evidence-env.json"))
+targeted = json.load(open("/tmp/evidence-env-4090.json"))
+default_rows = json.loads(default["WEINFER_BOOTSTRAP_HARDWARE"])
+targeted_rows = json.loads(targeted["WEINFER_BOOTSTRAP_HARDWARE"])
+expected = [
+    row for row in default_rows
+    if row["gpu_sku"] == "NVIDIA GeForce RTX 4090"
+]
+assert len(default_rows) == 9, default_rows
+assert len(expected) == 1, expected
+assert targeted_rows == expected, (targeted_rows, expected)
+assert targeted_rows[0]["throughput_seed_tokens_per_sec"] == 9548
+assert targeted_rows[0]["throughput_seed_kind"] == "traffic_observed_cross_identity"
+assert "seed4090-1787834610" in targeted_rows[0]["throughput_seed_source"]
+assert targeted_rows[0]["boot_seed_micros"] == 664034722
+assert targeted_rows[0]["drain_seed_micros"] == 633859
+assert targeted_rows[0]["fixed_seed_kind"] == "traffic_observed_cross_identity"
+assert "seed4090-1787834610" in targeted_rows[0]["fixed_seed_source"]
+PY
+
+if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA Imaginary GPU" \
+  bash "$DEPLOY_SCRIPT" --render-env >/tmp/evidence-env-invalid.json 2>/tmp/evidence-env-invalid.log; then
+  echo "PROFILE EVIDENCE REGRESSION FAIL: unknown exact-identity selector passed" >&2
+  exit 1
+fi
+grep -q "must name exactly one configured identity" /tmp/evidence-env-invalid.log || {
+  echo "PROFILE EVIDENCE REGRESSION FAIL: unknown selector lacked named refusal" >&2
+  exit 1
+}
 
 CONTRACT_FILE="$CONTRACT_FILE" python3 - <<'PY'
 import json, os, sys
@@ -92,11 +134,12 @@ def evaluate(env, contract):
     exact_keys = {
         "gpu_sku", "cuda_class", "vram_gb",
         "throughput_seed_tokens_per_sec", "throughput_seed_kind",
-        "throughput_seed_source",
+        "throughput_seed_source", "boot_seed_micros", "drain_seed_micros",
+        "fixed_seed_kind", "fixed_seed_source",
     }
     check("bootstrap-shape",
           bool(bootstrap) and all(set(row) == exact_keys for row in bootstrap),
-          "unmeasured hardware may carry identity plus typed ordering prior only")
+          "unmeasured hardware may carry identity plus independent typed ordering priors only")
     expected = {
         "NVIDIA RTX A5000": 24,
         "NVIDIA RTX 4000 SFF Ada Generation": 20,
@@ -121,7 +164,8 @@ def evaluate(env, contract):
         "NVIDIA GeForce RTX 3090": (6000, "spec_derived"),
         "NVIDIA GeForce RTX 3090 Ti": (6700, "spec_derived"),
         "NVIDIA RTX A6000": (6500, "spec_derived"),
-        "NVIDIA GeForce RTX 4090": (13900, "spec_derived"),
+        "NVIDIA GeForce RTX 4090":
+            (9548, "traffic_observed_cross_identity"),
         "NVIDIA A40": (4000, "policy_prior"),
     }
     actual_seeds = {
@@ -137,13 +181,46 @@ def evaluate(env, contract):
               and row["throughput_seed_source"].strip()
               and ((row["throughput_seed_kind"] == "traffic_observed_cross_identity"
                     and "workload_sha256=2392bb58" in row["throughput_seed_source"]
-                    and "candidate_only" in row["throughput_seed_source"])
+                    and "candidate_only" in row["throughput_seed_source"]
+                    and "basis=" in row["throughput_seed_source"])
                    or (row["throughput_seed_kind"] !=
                        "traffic_observed_cross_identity"
                        and "no traffic observation" in
                            row["throughput_seed_source"]))
               for row in bootstrap),
           "traffic-backed and analytic/policy priors must remain visibly distinct")
+    expected_fixed = {
+        "NVIDIA RTX A5000": (664034722, 731031, "policy_prior"),
+        "NVIDIA RTX 4000 SFF Ada Generation":
+            (492992942, 685232, "traffic_observed_cross_identity"),
+        "NVIDIA RTX A4500":
+            (429080126, 731031, "traffic_observed_cross_identity"),
+        "NVIDIA RTX 4000 Ada Generation": (664034722, 731031, "policy_prior"),
+        "NVIDIA GeForce RTX 3090": (664034722, 731031, "policy_prior"),
+        "NVIDIA GeForce RTX 3090 Ti": (664034722, 731031, "policy_prior"),
+        "NVIDIA RTX A6000": (664034722, 731031, "policy_prior"),
+        "NVIDIA GeForce RTX 4090":
+            (664034722, 633859, "traffic_observed_cross_identity"),
+        "NVIDIA A40": (664034722, 731031, "policy_prior"),
+    }
+    actual_fixed = {
+        row.get("gpu_sku"): (
+            row.get("boot_seed_micros"), row.get("drain_seed_micros"),
+            row.get("fixed_seed_kind"),
+        ) for row in bootstrap
+    }
+    check("bootstrap-fixed-seed-map", actual_fixed == expected_fixed,
+          f"{actual_fixed} != {expected_fixed}")
+    check("bootstrap-fixed-seed-provenance",
+          all(isinstance(row.get("fixed_seed_source"), str)
+              and row["fixed_seed_source"].strip()
+              and ((row["fixed_seed_kind"] == "traffic_observed_cross_identity"
+                    and "candidate_only" in row["fixed_seed_source"])
+                   or (row["fixed_seed_kind"] == "policy_prior"
+                       and "no SKU traffic observation" in
+                           row["fixed_seed_source"]))
+              for row in bootstrap),
+          "traffic-backed and policy fixed-cost priors must remain visibly distinct")
     check("no-static-cuda-pin", "WEINFER_CUDA_VERSIONS" not in env,
           "bootstrap CUDA is selected from the live catalog per attempt")
     # (2) engine launch bytes: one exact registered delta, never a
@@ -218,6 +295,12 @@ mut8["VLLM_EXTRA_ARGS"] = env["VLLM_EXTRA_ARGS"].replace(
     "--enable-prefix-caching", "--no-enable-prefix-caching")
 assert any("positive-prefix-cache-flag" in f for f in evaluate(mut8, contract)), \
     "DETECTOR BROKEN: negative prefix caching declaration passed"
+mut9 = dict(env)
+forged_fixed = json.loads(env["WEINFER_BOOTSTRAP_HARDWARE"])
+forged_fixed[0]["fixed_seed_kind"] = "measured_exact_identity"
+mut9["WEINFER_BOOTSTRAP_HARDWARE"] = json.dumps(forged_fixed)
+assert any("bootstrap-fixed-seed-map" in f for f in evaluate(mut9, contract)), \
+    "DETECTOR BROKEN: a bootstrap fixed-cost prior laundered itself as measured"
 
 fails = evaluate(env, contract)
 if fails:
@@ -226,7 +309,8 @@ if fails:
         print("  -", f)
     sys.exit(1)
 print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities, no "
-      "economic claim; typed ordering priors cannot become Measured facts; launch bytes "
+      "economic claim; independent typed throughput/fixed-cost priors cannot become "
+      "Measured facts or deadline authority; launch bytes "
       "equal the frozen contract plus one registered positive cache flag; historical "
       "effective cache state UNKNOWN; detector self-test red")
 PY
