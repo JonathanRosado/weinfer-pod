@@ -24,6 +24,7 @@ run_deploy() { # -> exit code in $DEPLOY_CODE, log in /tmp/deploy-tail.log
   WEINFER_DEPLOY_API_BASE="http://127.0.0.1:${PORT}" \
   WEINFER_DEPLOY_HEALTH_BASE="http://127.0.0.1:${PORT}" \
   WEINFER_HEALTH_DEADLINE_SECS=10 \
+  WEINFER_CONTROLPLANE_STORAGE_MODE="${STORAGE_MODE:-network-volume}" \
   HOME=/tmp/deploy-tail-home \
     bash "$DEPLOY" > /tmp/deploy-tail.log 2>&1
   DEPLOY_CODE=$?
@@ -126,6 +127,9 @@ assert body["cpuFlavorIds"] == [
 ], body
 assert body["cpuFlavorPriority"] == "availability", body
 assert body["vcpuCount"] == 2, body
+assert body["env"]["WEINFER_CONTROLPLANE_STORAGE_MODE"] == "network-volume", body
+assert isinstance(body.get("networkVolumeId"), str) and body["networkVolumeId"], body
+assert "volumeInGb" not in body, body
 PY
 echo "ok: S6 success path — live, credentials 0600, nothing deleted"
 # (S6's pod is legitimately RUNNING; terminate it so the suite's final
@@ -139,5 +143,34 @@ if [ -n "$S6_POD" ]; then
   curl -fsS -X DELETE "http://127.0.0.1:${PORT}/pods/${S6_POD}" >/dev/null
 fi
 assert_all_terminated "S6-final"
+
+# --- S7: the registered N=24 storage mode uses a run-scoped Pod volume,
+# exposes the mode in the rendered authority, and cannot accidentally retain a
+# network-volume binding.
+rm -f /tmp/fake-v1-deletes.log /tmp/fake-v1-bodies.jsonl
+mode '{"mode":"ok","list_delay":0}'
+STORAGE_MODE=run-scoped-pod run_deploy
+[ "$DEPLOY_CODE" = "0" ] || { echo "S7 FAIL: run-scoped path exited $DEPLOY_CODE"; cat /tmp/deploy-tail.log; exit 1; }
+python3 - /tmp/fake-v1-bodies.jsonl <<'PY'
+import json, sys
+body = json.loads(open(sys.argv[1]).readlines()[-1])
+assert body["env"]["WEINFER_CONTROLPLANE_STORAGE_MODE"] == "run-scoped-pod", body
+assert body["volumeInGb"] == 10, body
+assert body["volumeMountPath"] == "/workspace", body
+assert "networkVolumeId" not in body, body
+PY
+grep -q "run-scoped Pod volume (10GB, deleted with Pod)" /tmp/deploy-tail.log || {
+  echo "S7 FAIL: run-scoped storage was not reported truthfully"; cat /tmp/deploy-tail.log; exit 1;
+}
+S7_POD=$(curl -fsS "http://127.0.0.1:${PORT}/pods" | python3 -c "
+import json,sys
+pods=[p for p in json.load(sys.stdin) if p.get('status') != 'TERMINATED']
+print(pods[0]['id'] if pods else '')")
+if [ -n "$S7_POD" ]; then
+  curl -fsS -X DELETE "http://127.0.0.1:${PORT}/pods/${S7_POD}" >/dev/null
+  curl -fsS -X DELETE "http://127.0.0.1:${PORT}/pods/${S7_POD}" >/dev/null
+fi
+assert_all_terminated "S7-final"
+echo "ok: S7 run-scoped Pod volume — exact body, truthful output, zero-live"
 
 echo "DEPLOY TAIL REGRESSION PASS"

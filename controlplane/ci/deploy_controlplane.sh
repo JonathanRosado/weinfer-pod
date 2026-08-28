@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Deploy the PERSISTENT WeInfer control plane: one cheap RunPod CPU
-# pod running the pinned control-plane image (durable Postgres on a
-# network volume + the sha-pinned gateway), public HTTPS at the
-# provider proxy, owning a managed GPU pool through the cost planner.
+# Deploy the WeInfer control plane: one cheap RunPod CPU pod running the
+# pinned control-plane image (Postgres + the sha-pinned gateway), public HTTPS
+# at the provider proxy, owning a managed GPU pool through the cost planner.
+# Persistent deployments default to a durable network volume.  The registered
+# N=24 measurement selects a run-scoped Pod volume so CPU placement is not
+# stranded by network-volume host scarcity; it survives Pod restarts and is
+# deleted with the Pod after all database-backed evidence is sealed locally.
 #
-# COST WHEN RUN: CPU pod cents/hour + network volume cents/GB-month.
+# COST WHEN RUN: CPU pod cents/hour + the selected storage substrate.
 # The launch ceiling is IN CODE below: health deadline, direct pod
 # DELETE on any failure, zero-live verification, and an explicit
-# ongoing burn ceiling printed for the record.  The volume is the one
-# deliberate durable asset and is kept on failure.
+# ongoing burn ceiling printed for the record.
 #
 # TRUST ROOTS ARE COMMITTED CONSTANTS (codex 0162): image digest and
 # both binary sha256 values are pinned here; remote release metadata
@@ -21,6 +23,15 @@ cd "$(dirname "$0")/.."
 # this so the environment it proves is the environment we deploy.
 RENDER_ONLY=0
 [ "${1:-}" = "--render-env" ] && RENDER_ONLY=1
+
+CONTROLPLANE_STORAGE_MODE="${WEINFER_CONTROLPLANE_STORAGE_MODE:-network-volume}"
+case "$CONTROLPLANE_STORAGE_MODE" in
+  network-volume|run-scoped-pod) ;;
+  *)
+    echo "WEINFER_CONTROLPLANE_STORAGE_MODE must be network-volume or run-scoped-pod" >&2
+    exit 1
+    ;;
+esac
 
 # Retention-policy arm selector.  Production defaults to the shipped
 # demand-aware policy (three complete quiet cycles).  Paid comparisons may
@@ -90,8 +101,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:693db10834a098d0267949098edc334593c5e418c3f8e6b5b944ee41d5b741de"
-GW_TAG="gateway-v0.18.0"
-GW_SHA="5b43c6ae6cc14c3a0d1eb894957e185dba237b924b074d0af8611480326572d2"
+GW_TAG="gateway-v0.20.0"
+GW_SHA="57d84dd409ebb0e053eb01beaaffc91a6ec32e4c26e15dc1d6387fdb11601e3c"
 WORKER_TAG="worker-v0.6.0"
 WORKER_SHA="0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -114,7 +125,7 @@ echo "trust roots consistent (gateway ${GW_SHA:0:12}…, worker ${WORKER_SHA:0:1
 
 # ---------- burn ceiling ----------
 CEILING_CPU_USD_HR="0.10"     # refuse any CPU flavor above this
-VOLUME_GB=10                  # ~$0.70/month at the documented $0.07/GB-mo
+VOLUME_GB=10                  # network volume or run-scoped Pod volume
 HEALTH_DEADLINE_SECS="${WEINFER_HEALTH_DEADLINE_SECS:-900}"  # /healthz within 15 min or we delete
 
 sha() { python3 -c "import hashlib,sys;print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$1"; }
@@ -259,6 +270,7 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   BOOT_FRACTION="$BOOT_FRACTION" \
   POLICY_BOOT_SEED_SECS="$POLICY_BOOT_SEED_SECS" \
   POLICY_TOKENS_PER_SEC="$POLICY_TOKENS_PER_SEC" \
+  CONTROLPLANE_STORAGE_MODE="$CONTROLPLANE_STORAGE_MODE" \
   python3 - <<'PY'
 import json, os
 e = os.environ
@@ -276,6 +288,10 @@ env = {
     # observations.  The registered A/B control may raise this value until
     # the gateway's one-boot parity cap becomes the effective TTL.
     "WEINFER_DEMAND_QUIET_CYCLES": e["DEMAND_QUIET_CYCLES"],
+    # Evidence-only restatement. The container does not branch on this value;
+    # preflight checks it in the separately rendered environment. No artifact
+    # currently binds this restatement to the live deployment invocation.
+    "WEINFER_CONTROLPLANE_STORAGE_MODE": e["CONTROLPLANE_STORAGE_MODE"],
     # Cold-pod backlog trigger only. Production is 0.2; registered deep-
     # backlog measurements must record any override as an explicit variable.
     "WEINFER_BOOT_FRACTION": e["BOOT_FRACTION"],
@@ -343,22 +359,36 @@ chmod 600 "$CRED_FILE"
 echo "credentials written ONCE to ${CRED_FILE} (mode 0600)"
 echo "  fingerprints: admin $(sha "$ADMIN_KEY" | cut -c1-12)… customer $(sha "$CUSTOMER_KEY" | cut -c1-12)… worker $(sha "$WORKER_KEY" | cut -c1-12)…"
 
-# ---------- network volume (the deliberate durable asset) ----------
-echo "== network volume =="
-VOL_ID="${VOLUME_ID:-}"
-if [ -z "$VOL_ID" ]; then
-  VOL_ID=$(rp GET /networkvolumes | python3 -c "
+# ---------- explicit storage substrate ----------
+VOL_ID=""
+if [ "$CONTROLPLANE_STORAGE_MODE" = "network-volume" ]; then
+  echo "== network volume =="
+  VOL_ID="${VOLUME_ID:-}"
+  if [ -z "$VOL_ID" ]; then
+    VOL_ID=$(rp GET /networkvolumes | python3 -c "
 import json,sys
 vols=[v for v in json.load(sys.stdin) if v.get('name')=='weinfer-controlplane']
 print(vols[0]['id'] if vols else '')")
-fi
-if [ -z "$VOL_ID" ]; then
-  VOL_ID=$(rp POST /networkvolumes \
-    '{"name":"weinfer-controlplane","size":'"$VOLUME_GB"',"dataCenterId":"'"${DATACENTER:-EU-RO-1}"'"}' \
-    | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
-  echo "created volume $VOL_ID (${VOLUME_GB}GB)"
+  fi
+  if [ -z "$VOL_ID" ]; then
+    VOL_ID=$(rp POST /networkvolumes \
+      '{"name":"weinfer-controlplane","size":'"$VOLUME_GB"',"dataCenterId":"'"${DATACENTER:-EU-RO-1}"'"}' \
+      | python3 -c "import json,sys;print(json.load(sys.stdin)['id'])")
+    echo "created volume $VOL_ID (${VOLUME_GB}GB)"
+  else
+    echo "reusing volume $VOL_ID"
+  fi
 else
-  echo "reusing volume $VOL_ID"
+  [ -z "${VOLUME_ID:-}" ] || {
+    echo "VOLUME_ID is incompatible with run-scoped-pod storage" >&2
+    exit 1
+  }
+  [ -z "${DATACENTER:-}" ] || {
+    echo "DATACENTER is incompatible with availability-priority run-scoped-pod storage" >&2
+    exit 1
+  }
+  echo "== run-scoped Pod volume =="
+  echo "using ${VOLUME_GB}GB at /workspace (survives restarts; deleted with Pod)"
 fi
 
 # ---------- create the pod: FAIL-CLOSED launch cap (codex 0163) ----------
@@ -420,7 +450,11 @@ on_exit() {
   # errexit would abort this trap on any failing guard — the cleanup
   # itself must never be skippable.
   set +e
-  echo "LAUNCH FAILED — cleaning up (volume kept as the durable asset)" >&2
+  if [ "$CONTROLPLANE_STORAGE_MODE" = "network-volume" ]; then
+    echo "LAUNCH FAILED — cleaning up (network volume kept as the durable asset)" >&2
+  else
+    echo "LAUNCH FAILED — cleaning up (run-scoped storage dies with the Pod)" >&2
+  fi
   # Resolve the pod id: captured, or discovered by this launch's
   # unique name (the ambiguous-create path).
   if [ -z "$POD_ID" ]; then
@@ -475,27 +509,43 @@ print(sum(1 for p in pods if (p.get('status') or p.get('desiredStatus')) != 'TER
 trap on_exit EXIT
 
 echo "== control-plane pod (${CP_NAME}) =="
-CREATE_BODY=$(python3 - "$ENV_JSON" "$CP_IMAGE" "$VOL_ID" "$CP_NAME" <<'PY_EOF'
+CREATE_BODY=$(python3 - "$ENV_JSON" "$CP_IMAGE" "$VOL_ID" "$CP_NAME" "$CONTROLPLANE_STORAGE_MODE" "$VOLUME_GB" <<'PY_EOF'
 import json, sys
-env, image, vol, name = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-print(json.dumps({
+env, image, vol, name, storage_mode, volume_gb = (
+    json.loads(sys.argv[1]),
+    sys.argv[2],
+    sys.argv[3],
+    sys.argv[4],
+    sys.argv[5],
+    int(sys.argv[6]),
+)
+body = {
     "name": name,
     "imageName": image,
     "computeType": "CPU",
-    # The network volume fixes the data center, so one exhausted CPU
-    # family must not strand the durable control plane.  RunPod's
-    # availability priority selects among these official 2-vCPU
-    # families; the exact returned hourly rate remains subject to the
-    # hard $0.10 refusal/delete ceiling below.
+    # Availability priority selects among every official 2-vCPU family. In
+    # network-volume mode the volume fixes the data center; run-scoped mode can
+    # use any provider-selected location. The returned rate remains subject to
+    # the same exact $0.10 refusal/delete ceiling below.
     "cpuFlavorIds": ["cpu3c", "cpu5c", "cpu3g", "cpu5g", "cpu3m", "cpu5m"],
     "cpuFlavorPriority": "availability",
     "vcpuCount": 2,
     "containerDiskInGb": 10,
-    "networkVolumeId": vol,
     "volumeMountPath": "/workspace",
     "ports": ["8080/http"],
     "env": env,
-}))
+}
+if storage_mode == "network-volume":
+    if not vol:
+        raise SystemExit("network-volume mode requires a volume id")
+    body["networkVolumeId"] = vol
+elif storage_mode == "run-scoped-pod":
+    if vol:
+        raise SystemExit("run-scoped-pod mode may not carry a network volume id")
+    body["volumeInGb"] = volume_gb
+else:
+    raise SystemExit("unknown control-plane storage mode")
+print(json.dumps(body))
 PY_EOF
 )
 # The create call itself: any transport/API/JSON failure lands in the
@@ -544,11 +594,19 @@ echo
 echo "CONTROL PLANE LIVE:"
 echo "  public base:  ${PUBLIC_BASE}"
 echo "  pod:          ${POD_ID} (\$${POD_RATE:-?}/hr; ceiling \$${CEILING_CPU_USD_HR}/hr)"
-echo "  volume:       ${VOL_ID} (${VOLUME_GB}GB, durable)"
+if [ "$CONTROLPLANE_STORAGE_MODE" = "network-volume" ]; then
+  echo "  storage:      network volume ${VOL_ID} (${VOLUME_GB}GB, survives Pod deletion)"
+else
+  echo "  storage:      run-scoped Pod volume (${VOLUME_GB}GB, deleted with Pod)"
+fi
 echo "  credentials:  ${CRED_FILE}"
 echo "  retention:    demand_quiet_cycles=${DEMAND_QUIET_CYCLES}"
 echo "  cold target:  boot_fraction=${BOOT_FRACTION}"
 echo "  cold inputs:  boot_seed=${POLICY_BOOT_SEED_SECS}s policy_tps=${POLICY_TOKENS_PER_SEC}"
-echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + volume ~\$0.70/mo — founder-visible, deliberate"
+if [ "$CONTROLPLANE_STORAGE_MODE" = "network-volume" ]; then
+  echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + network volume ~\$0.70/mo — founder-visible, deliberate"
+else
+  echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr with run-scoped storage — founder-visible, deliberate"
+fi
 echo
 echo "next: scripts/canary_traversal.sh ${PUBLIC_BASE} ${CRED_FILE}"
