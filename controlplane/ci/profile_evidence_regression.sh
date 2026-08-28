@@ -77,9 +77,10 @@ done
 
 # The paid exact-identity selector may only narrow the default queue. It must
 # preserve the selected row's typed prior/provenance exactly and may not forge
-# a tenth identity. This render is zero-provider and never reads the real key.
+# an unknown identity. This render is zero-provider and never reads the real key.
 ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 4090" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="12" \
   bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env-4090.json
 
 python3 - <<'PY'
@@ -92,8 +93,9 @@ targeted_rows = json.loads(targeted["WEINFER_BOOTSTRAP_HARDWARE"])
 expected = [
     row for row in default_rows
     if row["gpu_sku"] == "NVIDIA GeForce RTX 4090"
+    and row["cuda_class"] == "12"
 ]
-assert len(default_rows) == 9, default_rows
+assert len(default_rows) == 11, default_rows
 assert len(expected) == 1, expected
 assert targeted_rows == expected, (targeted_rows, expected)
 assert targeted_rows[0]["throughput_seed_tokens_per_sec"] == 9548
@@ -105,8 +107,44 @@ assert targeted_rows[0]["fixed_seed_kind"] == "traffic_observed_cross_identity"
 assert "seed4090-1787834610" in targeted_rows[0]["fixed_seed_source"]
 PY
 
+ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 3090" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="13" \
+  bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env-3090-cuda13.json
+
+python3 - <<'PY'
+import json
+default = json.load(open("/tmp/evidence-env.json"))
+targeted = json.load(open("/tmp/evidence-env-3090-cuda13.json"))
+default_rows = json.loads(default["WEINFER_BOOTSTRAP_HARDWARE"])
+targeted_rows = json.loads(targeted["WEINFER_BOOTSTRAP_HARDWARE"])
+expected = [
+    row for row in default_rows
+    if row["gpu_sku"] == "NVIDIA GeForce RTX 3090"
+    and row["cuda_class"] == "13"
+]
+assert len(expected) == 1, expected
+assert targeted_rows == expected, (targeted_rows, expected)
+assert targeted_rows[0]["throughput_seed_tokens_per_sec"] == 3943
+assert "CUDA class 13 is an unmeasured exact-identity variant" in (
+    targeted_rows[0]["throughput_seed_source"]
+)
+PY
+
+if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 3090" \
+  bash "$DEPLOY_SCRIPT" --render-env >/tmp/evidence-env-missing-class.json 2>/tmp/evidence-env-missing-class.log; then
+  echo "PROFILE EVIDENCE REGRESSION FAIL: SKU-only selector passed" >&2
+  exit 1
+fi
+grep -q "must be set together" /tmp/evidence-env-missing-class.log || {
+  echo "PROFILE EVIDENCE REGRESSION FAIL: SKU-only selector lacked named refusal" >&2
+  exit 1
+}
+
 if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA Imaginary GPU" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="12" \
   bash "$DEPLOY_SCRIPT" --render-env >/tmp/evidence-env-invalid.json 2>/tmp/evidence-env-invalid.log; then
   echo "PROFILE EVIDENCE REGRESSION FAIL: unknown exact-identity selector passed" >&2
   exit 1
@@ -187,20 +225,24 @@ def evaluate(env, contract):
           bool(bootstrap) and all(set(row) == exact_keys for row in bootstrap),
           "unmeasured hardware may carry identity plus independent typed ordering priors only")
     expected = {
-        "NVIDIA RTX A5000": 24,
-        "NVIDIA RTX 4000 SFF Ada Generation": 20,
-        "NVIDIA RTX A4500": 20,
-        "NVIDIA RTX 4000 Ada Generation": 20,
-        "NVIDIA GeForce RTX 3090": 24,
-        "NVIDIA GeForce RTX 3090 Ti": 24,
-        "NVIDIA RTX A6000": 48,
-        "NVIDIA GeForce RTX 4090": 24,
-        "NVIDIA A40": 48,
+        ("NVIDIA RTX A5000", "12"): 24,
+        ("NVIDIA RTX 4000 SFF Ada Generation", "12"): 20,
+        ("NVIDIA RTX A4500", "12"): 20,
+        ("NVIDIA RTX 4000 Ada Generation", "12"): 20,
+        ("NVIDIA GeForce RTX 3090", "12"): 24,
+        ("NVIDIA GeForce RTX 3090", "13"): 24,
+        ("NVIDIA GeForce RTX 3090 Ti", "12"): 24,
+        ("NVIDIA GeForce RTX 3090 Ti", "13"): 24,
+        ("NVIDIA RTX A6000", "12"): 48,
+        ("NVIDIA GeForce RTX 4090", "12"): 24,
+        ("NVIDIA A40", "12"): 48,
     }
-    actual = {row.get("gpu_sku"): row.get("vram_gb") for row in bootstrap}
-    check("bootstrap-set", actual == expected, f"{actual} != {expected}")
-    check("bootstrap-cuda-class",
-          all(row.get("cuda_class") == "12" for row in bootstrap))
+    actual = {
+        (row.get("gpu_sku"), str(row.get("cuda_class"))): row.get("vram_gb")
+        for row in bootstrap
+    }
+    check("bootstrap-set", len(bootstrap) == 11 and actual == expected,
+          f"{actual} != {expected}")
     expected_seeds = {
         "NVIDIA RTX A5000": (2628, "policy_prior"),
         "NVIDIA RTX 4000 SFF Ada Generation":
@@ -221,7 +263,12 @@ def evaluate(env, contract):
             row.get("throughput_seed_kind"),
         ) for row in bootstrap
     }
-    check("bootstrap-seed-map", actual_seeds == expected_seeds,
+    check("bootstrap-seed-map",
+          set(actual_seeds) == set(expected_seeds)
+          and all((row.get("throughput_seed_tokens_per_sec"),
+                   row.get("throughput_seed_kind")) ==
+                  expected_seeds.get(row.get("gpu_sku"))
+                  for row in bootstrap),
           f"{actual_seeds} != {expected_seeds}")
     check("bootstrap-seed-provenance",
           all(isinstance(row.get("throughput_seed_source"), str)
@@ -290,7 +337,12 @@ def evaluate(env, contract):
             row.get("fixed_seed_kind"),
         ) for row in bootstrap
     }
-    check("bootstrap-fixed-seed-map", actual_fixed == expected_fixed,
+    check("bootstrap-fixed-seed-map",
+          set(actual_fixed) == set(expected_fixed)
+          and all((row.get("boot_seed_micros"), row.get("drain_seed_micros"),
+                   row.get("fixed_seed_kind")) ==
+                  expected_fixed.get(row.get("gpu_sku"))
+                  for row in bootstrap),
           f"{actual_fixed} != {expected_fixed}")
     check("bootstrap-fixed-seed-provenance",
           all(isinstance(row.get("fixed_seed_source"), str)
@@ -306,8 +358,8 @@ def evaluate(env, contract):
         row for row in bootstrap
         if row["throughput_seed_kind"] != "traffic_observed_cross_identity"
     ]
-    check("unobserved-capacity-preserved", len(unobserved) == 5,
-          "calibration must keep all five unobserved identities configured")
+    check("unobserved-capacity-preserved", len(unobserved) == 6,
+          "calibration must keep six non-traffic identity variants configured")
     check("unobserved-drain-maximum",
           all(row["drain_seed_micros"] == 740377
               and "batch-live-1787630415/A4500" in row["fixed_seed_source"]
@@ -361,24 +413,38 @@ def evaluate(env, contract):
         12: ("NVIDIA GeForce RTX 4090", 13093),
         24: ("NVIDIA GeForce RTX 4090", 11493),
     }
-    if (set(row.get("gpu_sku") for row in bootstrap) == set(rates)
+    economic_by_sku = {}
+    identity_variant_fields = (
+        "vram_gb", "throughput_seed_tokens_per_sec", "throughput_seed_kind",
+        "boot_seed_micros", "drain_seed_micros", "fixed_seed_kind",
+    )
+    variants_consistent = True
+    for row in bootstrap:
+        prior = economic_by_sku.setdefault(row.get("gpu_sku"), row)
+        variants_consistent = variants_consistent and all(
+            row.get(field) == prior.get(field) for field in identity_variant_fields
+        )
+    economic_bootstrap = list(economic_by_sku.values())
+    check("cuda-variant-prior-equality", variants_consistent,
+          "CUDA variants of one SKU must reuse the identical typed economic prior")
+    if (set(economic_by_sku) == set(rates)
             and all(isinstance(row.get("throughput_seed_tokens_per_sec"), int)
                     and row["throughput_seed_tokens_per_sec"] > 0
                     and isinstance(row.get("boot_seed_micros"), int)
                     and isinstance(row.get("drain_seed_micros"), int)
-                    for row in bootstrap)):
+                    for row in economic_bootstrap)):
         delivered_ranked = {
             batches: sorted((
                 ordering_cost_at_tokens(row, delivered_batch_tokens * batches),
                 row["gpu_sku"], row)
-                for row in bootstrap)
+                for row in economic_bootstrap)
             for batches in delivered_proxy_leaders
         }
         live_ranked = {
             batches: sorted((
                 ordering_cost_at_tokens(row, estimated_batch_tokens * batches),
                 row["gpu_sku"], row)
-                for row in bootstrap)
+                for row in economic_bootstrap)
             for batches in live_estimated_leaders
         }
         check("observed-leader-at-delivered-token-proxies",
@@ -413,11 +479,11 @@ def evaluate(env, contract):
               "without calibration the unobserved A5000 would lead at the live 12-batch estimated backlog")
     else:
         check("observed-leader-at-delivered-token-proxies", False,
-              "exact nine-row typed input is required")
+              "exact nine-outcome typed input is required")
         check("observed-leader-at-live-estimated-backlogs", False,
-              "exact nine-row typed input is required")
+              "exact nine-outcome typed input is required")
         check("calibration-omission-red", False,
-              "exact nine-row typed input is required")
+              "exact nine-outcome typed input is required")
     check("no-static-cuda-pin", "WEINFER_CUDA_VERSIONS" not in env,
           "bootstrap CUDA is selected from the live catalog per attempt")
     # (2) engine launch bytes: one exact registered delta, never a
@@ -435,8 +501,13 @@ def evaluate(env, contract):
           f"{env['WEINFER_IMAGE']} != {contract['image']}")
     # A4500 remains one explicit hardware identity from the sealed
     # contract, but it no longer owns the whole deployment.  The other
-    # eight SKUs are unmeasured candidates under the same engine bytes.
-    check("sealed-hardware-present", actual.get(contract["gpu"]) == 20)
+    # eight SKU outcomes (including two added CUDA-class variants) are
+    # unmeasured candidates under the same engine bytes.
+    check("sealed-hardware-present",
+          any(row.get("gpu_sku") == contract["gpu"]
+              and row.get("cuda_class") == "12"
+              and row.get("vram_gb") == 20
+              for row in bootstrap))
     check("sealed-cuda-class",
           all(str(pin).split(".", 1)[0] == "12" for pin in [contract["cuda_pin"]]))
     check("revision", env["WEINFER_MODEL_REVISION"] == contract["model_revision"])
@@ -524,7 +595,8 @@ if fails:
     for f in fails:
         print("  -", f)
     sys.exit(1)
-print("PROFILE EVIDENCE REGRESSION PASS: nine explicit unmeasured SKU identities, no "
+print("PROFILE EVIDENCE REGRESSION PASS: nine SKU outcomes across eleven explicit "
+      "unmeasured hardware identities, no "
       "economic claim; scored ready-window calibration preserves all candidates and "
       "an observed leader at delivered-token proxies and live estimated backlogs for "
       "1/3/12/24 batches; independent typed throughput/fixed-cost "

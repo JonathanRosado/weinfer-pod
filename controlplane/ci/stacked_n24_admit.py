@@ -53,6 +53,15 @@ PLACEMENT_AUDIT_COMPACT_ROW_KEYS = frozenset(
         "launch_contract_digest",
     }
 )
+POD_IDENTITY_KEYS = (
+    "pod_id",
+    "pool",
+    "model",
+    "gpu_sku",
+    "cuda_class",
+    "launch_contract_digest",
+    "provider_rate_micro_per_hour",
+)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ANCHOR_SHA256 = "2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205"
 ACCEPTED_MARKER = "300/300 accepted; row-0 replay identical"
@@ -119,7 +128,7 @@ def require_pre_spend_receipt(
         or ceilings.get("control_plane_create_usd_per_hour") != "0.10"
     ):
         raise RuntimeError("pre-spend receipt does not bind this registered series")
-    expected_shape = "full_nine_row_queue" if variant == "anchor" else "target_only"
+    expected_shape = "full_eleven_identity_queue" if variant == "anchor" else "target_only"
     if value.get("rendered_environment", {}).get("bootstrap_shape") != expected_shape:
         raise RuntimeError("pre-spend receipt bootstrap shape differs from this series")
     registered_sources = value.get("registered_sources")
@@ -419,11 +428,13 @@ def cache_sample(
     raw_path = cache_root / f"sample-{observation_sequence:02d}-batch-{batch_index:02d}.json"
     atomic_json(raw_path, profile)
     evidence = profile.get("evidence", {})
+    profile_identity = profile.get("profile_identity", {})
     fields = {
         "pod_id": evidence.get("pod_id"),
         "pool": evidence.get("pool"),
         "model": evidence.get("model"),
         "gpu_sku": evidence.get("gpu_sku"),
+        "cuda_class": profile_identity.get("cuda_class"),
         "launch_contract_digest": evidence.get("launch_contract_digest"),
         "provider_created_at_micros": evidence.get("provider_created_at_micros"),
         "provider_rate_micro_per_hour": evidence.get("provider_rate_micro_per_hour"),
@@ -434,10 +445,21 @@ def cache_sample(
         "latest_at_micros": evidence.get("engine_cache_latest_at_micros"),
     }
     if (
-        not all(
+        not isinstance(profile_identity, dict)
+        or profile_identity.get("gpu_sku") != fields["gpu_sku"]
+        or profile_identity.get("served_model") != fields["model"]
+        or not all(
             isinstance(fields[name], str) and fields[name]
-            for name in ("pod_id", "pool", "model", "gpu_sku", "launch_contract_digest")
+            for name in (
+                "pod_id",
+                "pool",
+                "model",
+                "gpu_sku",
+                "cuda_class",
+                "launch_contract_digest",
+            )
         )
+        or not fields["cuda_class"].isdigit()
         or not all(
             isinstance(fields[name], int) and fields[name] > 0
             for name in (
@@ -475,6 +497,23 @@ def cache_sample(
             "deltas, never exact per-batch hit rates"
         ),
     }
+
+
+def pod_identity_from_sample(sample: dict[str, Any]) -> dict[str, Any]:
+    """Build the exact terminal identity from the production sample schema."""
+    identity = {key: sample.get(key) for key in POD_IDENTITY_KEYS}
+    if (
+        not all(
+            isinstance(identity[key], str) and identity[key]
+            for key in POD_IDENTITY_KEYS
+            if key != "provider_rate_micro_per_hour"
+        )
+        or not identity["cuda_class"].isdigit()
+        or not isinstance(identity["provider_rate_micro_per_hour"], int)
+        or identity["provider_rate_micro_per_hour"] <= 0
+    ):
+        raise RuntimeError(f"terminal pod identity is incomplete: {identity}")
+    return identity
 
 
 def require_placement_audit(
@@ -583,6 +622,7 @@ def classify_acquisition(
         "limit_micros": ACQUISITION_LIMIT_MICROS,
         "terminal_pod_id": pod_id,
         "terminal_gpu_sku": pod_identity["gpu_sku"],
+        "terminal_cuda_class": pod_identity["cuda_class"],
         "successful_plan_id": success["plan_id"],
         "successful_attempt_ordinal": success["attempt_ordinal"],
         "successful_outcome_rows": outcomes_for_success,
@@ -822,6 +862,7 @@ def main() -> int:
                         "pool",
                         "model",
                         "gpu_sku",
+                        "cuda_class",
                         "launch_contract_digest",
                         "provider_created_at_micros",
                         "provider_rate_micro_per_hour",
@@ -924,17 +965,7 @@ def main() -> int:
         }
         conservation_path = root / "customer-conservation.json"
         atomic_json(conservation_path, conservation_document)
-        pod_identity = {
-            key: first_sample[key]
-            for key in (
-                "pod_id",
-                "pool",
-                "model",
-                "gpu_sku",
-                "launch_contract_digest",
-                "provider_rate_micro_per_hour",
-            )
-        }
+        pod_identity = pod_identity_from_sample(first_sample)
         since_micros = int(pre_spend["observer"]["pre_launch_epoch"]) * 1_000_000
         _, placement_document = client.request(
             "GET",

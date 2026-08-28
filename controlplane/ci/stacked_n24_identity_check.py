@@ -18,7 +18,13 @@ from typing import Any
 
 ANCHOR_SHA256 = "2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205"
 REALISTIC_SHA256 = "b9cc41bb6b9985bd077ca4204a4c6f0c16e1012410919f5a3514e5ff3219d6e5"
-BINDING_FIELDS = ("pool", "model", "gpu_sku", "launch_contract_digest")
+BINDING_FIELDS = (
+    "pool",
+    "model",
+    "gpu_sku",
+    "cuda_class",
+    "launch_contract_digest",
+)
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -85,6 +91,10 @@ def main() -> int:
         for field in BINDING_FIELDS
     ):
         raise ValueError("one series lacks a complete launch identity")
+    if not anchor_identity["cuda_class"].isdigit() or not realistic_identity[
+        "cuda_class"
+    ].isdigit():
+        raise ValueError("one series lacks a decimal CUDA class identity")
     mismatches = {
         field: {
             "anchor": anchor_identity.get(field),

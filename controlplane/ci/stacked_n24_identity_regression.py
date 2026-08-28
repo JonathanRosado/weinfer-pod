@@ -15,7 +15,12 @@ ANCHOR_SHA = "2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205"
 REALISTIC_SHA = "b9cc41bb6b9985bd077ca4204a4c6f0c16e1012410919f5a3514e5ff3219d6e5"
 
 
-def receipt(variant: str, workload: str, digest: str = "d" * 64) -> dict:
+def receipt(
+    variant: str,
+    workload: str,
+    digest: str = "d" * 64,
+    cuda_class: str = "12",
+) -> dict:
     return {
         "status": "complete",
         "variant": variant,
@@ -29,6 +34,7 @@ def receipt(variant: str, workload: str, digest: str = "d" * 64) -> dict:
             "pool": "community-qwen7b-0",
             "model": "Qwen/Qwen2.5-7B-Instruct",
             "gpu_sku": "NVIDIA GeForce RTX 4090",
+            "cuda_class": cuda_class,
             "launch_contract_digest": digest,
             "provider_rate_micro_per_hour": 340_000,
         },
@@ -57,6 +63,7 @@ def main() -> None:
         proof = json.loads(output.read_text())
         assert proof["status"] == "identity_bound"
         assert proof["anchor_pod_id"] != proof["realistic_pod_id"]
+        assert proof["binding_fields"]["cuda_class"] == "12"
         assert proof["cross_workload_numeric_comparison_emitted"] is False
         assert output.stat().st_mode & 0o777 == 0o600
 
@@ -70,13 +77,36 @@ def main() -> None:
         assert "launch identity mismatch" in refused.stderr
         assert not refused_output.exists()
 
+        cuda_mismatch = root / "realistic-cuda-mismatch.json"
+        cuda_mismatch.write_text(
+            json.dumps(
+                receipt("realistic", REALISTIC_SHA, cuda_class="13")
+            )
+        )
+        cuda_refused_output = root / "cuda-refused.json"
+        cuda_refused = invoke(anchor, cuda_mismatch, cuda_refused_output)
+        assert cuda_refused.returncode != 0
+        assert "launch identity mismatch" in cuda_refused.stderr
+        assert not cuda_refused_output.exists()
+
+        missing_cuda = receipt("realistic", REALISTIC_SHA)
+        missing_cuda["pod_identity"].pop("cuda_class")
+        missing_cuda_path = root / "realistic-missing-cuda.json"
+        missing_cuda_path.write_text(json.dumps(missing_cuda))
+        missing_cuda_output = root / "missing-cuda-refused.json"
+        missing_cuda_refused = invoke(anchor, missing_cuda_path, missing_cuda_output)
+        assert missing_cuda_refused.returncode != 0
+        assert "complete launch identity" in missing_cuda_refused.stderr
+        assert not missing_cuda_output.exists()
+
         repeated = invoke(anchor, realistic, output)
         assert repeated.returncode != 0
         assert "refusing to replace" in repeated.stderr
 
     print(
         "STACKED N24 IDENTITY REGRESSION PASS: exact launch binding; different "
-        "physical pods allowed; mismatch and proof overwrite refuse; no numeric ratio"
+        "physical pods allowed; CUDA-class mismatch/absence, digest mismatch, and "
+        "proof overwrite refuse; no numeric ratio"
     )
 
 

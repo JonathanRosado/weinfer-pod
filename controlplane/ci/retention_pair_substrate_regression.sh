@@ -21,10 +21,10 @@ import json
 import sys
 
 value = json.load(open(sys.argv[1]))
-assert value["WEINFER_GATEWAY_SHA256"] == "0b4748249ce3e3d968f26ae6b35ed9d32c09464feed9d25f32a10e964adae557"
+assert value["WEINFER_GATEWAY_SHA256"] == "220a3fb3999646c949c9fec6a2c5eb57d63993646aa7b9adc05712dc3aaaa69b"
 assert value["WEINFER_BOOTSTRAP_MODE"] == "1"
 hardware = json.loads(value["WEINFER_BOOTSTRAP_HARDWARE"])
-assert len(hardware) == 9
+assert len(hardware) == 11
 assert hardware[0]["gpu_sku"] == "NVIDIA RTX A5000"
 assert hardware[2]["gpu_sku"] == "NVIDIA RTX A4500"
 PY
@@ -51,4 +51,4 @@ if bash "$PREFLIGHT" "$test_tmp/tampered.sh" > "$test_tmp/tampered.out" 2> "$tes
 fi
 grep -q 'retention substrate refused: deploy sha' "$test_tmp/tampered.err"
 
-echo "RETENTION SUBSTRATE REGRESSION PASS: frozen v0.9/A4500 accepted; live v0.21/multi-SKU and tamper refused"
+echo "RETENTION SUBSTRATE REGRESSION PASS: frozen v0.9/A4500 accepted; live v0.22/multi-identity and tamper refused"

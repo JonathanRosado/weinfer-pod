@@ -157,7 +157,15 @@ class FakeClient:
         provider_created = 1_900_000_100_000_000
         if self.mode == "early_create":
             provider_created = 1_900_000_000_000_001
+        profile_identity = {
+            "served_model": "Qwen/Qwen2.5-7B-Instruct",
+            "gpu_sku": "NVIDIA GeForce RTX 4090",
+            "cuda_class": "12",
+        }
+        if self.mode == "missing_cuda_class":
+            profile_identity.pop("cuda_class")
         return 200, {
+            "profile_identity": profile_identity,
             "evidence": {
                 "pod_id": pod_id,
                 "pool": "community-qwen7b-0",
@@ -229,7 +237,7 @@ def invoke(
                 "policy_tokens_per_second": 4000,
             },
             "observer": {"pre_launch_epoch": now - 10},
-            "rendered_environment": {"bootstrap_shape": "full_nine_row_queue"},
+            "rendered_environment": {"bootstrap_shape": "full_eleven_identity_queue"},
             "predictions": {
                 "rows": 9,
                 "runtime_rate_authority": (
@@ -360,7 +368,9 @@ def main() -> None:
             assert terminal["accepted_jobs"] == terminal["completed_jobs"] == 7_200
             assert terminal["distinct_job_ids"] == 7_200
             assert terminal["accepted_before_provider_create"] is True
+            assert set(terminal["pod_identity"]) == set(MODULE.POD_IDENTITY_KEYS)
             assert terminal["pod_identity"]["gpu_sku"] == "NVIDIA GeForce RTX 4090"
+            assert terminal["pod_identity"]["cuda_class"] == "12"
             assert terminal["billable_tokens"] == 24 * 1_199_500
             conservation_path = good / "customer-conservation.json"
             conservation = json.loads(conservation_path.read_text())
@@ -386,6 +396,7 @@ def main() -> None:
                 is True
             )
             assert terminal["acquisition_classification"]["duration_micros"] == 150_000_000
+            assert terminal["acquisition_classification"]["terminal_cuda_class"] == "12"
             assert (good / "placement-decisions.json").is_file()
             assert (good / "acquisition-classification.json").is_file()
             source = json.loads((good / "source-receipt.json").read_text())
@@ -514,6 +525,11 @@ def main() -> None:
                 client_mode="identity_drift",
             )
             expect_failure(
+                base / "missing-cuda-class",
+                "cache observation is incoherent",
+                client_mode="missing_cuda_class",
+            )
+            expect_failure(
                 base / "early-create",
                 "provider create preceded complete 7,200-job acceptance",
                 client_mode="early_create",
@@ -557,9 +573,10 @@ def main() -> None:
         "STACKED N24 ADMISSION REGRESSION PASS: 24 tenants/7200 distinct jobs; "
         "one-shot lock; exact customer conservation; monotone pod-cache stamps; "
         "duplicate tenant/job, token mismatch, identity drift, early create, and "
-        "backward-cache reds; immutable exact pre-spend copy with stale/source-drift "
-        "refusals; launchd arming receipt gates all demand before filesystem or network "
-        "effects; same-clock acquisition classification and 600-second headline fence"
+        "backward-cache reds; authoritative CUDA-class propagation with missing-class "
+        "refusal; immutable exact pre-spend copy with stale/source-drift refusals; "
+        "launchd arming receipt gates all demand before filesystem or network effects; "
+        "same-clock acquisition classification and 600-second headline fence"
     )
 
 
