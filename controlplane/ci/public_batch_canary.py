@@ -222,6 +222,13 @@ class Client:
                         and path.startswith("/admin/jobs/")
                         and path.endswith("/profile-evidence")
                     )
+                    or (
+                        method == "GET"
+                        and path.split("?", 1)[0].startswith("/admin/pools/")
+                        and path.split("?", 1)[0].endswith(
+                            "/placement-decisions"
+                        )
+                    )
                 )
             )
             retrying = (

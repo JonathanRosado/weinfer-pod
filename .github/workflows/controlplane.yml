@@ -236,6 +236,7 @@ jobs:
           ln -s ci controlplane/scripts
           python3 controlplane/ci/controlplane_telemetry_regression.py
           python3 controlplane/ci/stacked_n24_admit_regression.py
+          python3 controlplane/ci/arm_stacked_n24_admit_launchd_regression.py
           python3 controlplane/ci/stacked_n24_identity_regression.py
       - name: one-shot retention window contract
         run: |

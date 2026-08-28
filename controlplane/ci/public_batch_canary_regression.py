@@ -45,6 +45,7 @@ class State:
         self.transient_job_404s: set[str] = set()
         self.transient_job_poll_404s: set[str] = set()
         self.transient_profile_404s: set[str] = set()
+        self.transient_placement_404s: set[str] = set()
         self.typed_missing_model_calls = 0
         self.typed_missing_job_calls = 0
         self.typed_missing_profile_calls = 0
@@ -205,6 +206,30 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(404, {"error": {"message": "not found"}})
 
     def do_GET(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        if (
+            parsed.path.startswith("/admin/pools/")
+            and parsed.path.endswith("/placement-decisions")
+        ):
+            if not self.authorized(ADMIN):
+                return self.send_json(401, {"error": {"message": "bad admin"}})
+            with STATE.lock:
+                if parsed.path not in STATE.transient_placement_404s:
+                    STATE.transient_placement_404s.add(parsed.path)
+                    payload = b"proxy route warming"
+                    self.send_response(404)
+                    self.send_header("content-type", "text/plain")
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+            return self.send_json(
+                200,
+                {
+                    "object": "placement_decision_audit",
+                    "complete_within_requested_window": True,
+                },
+            )
         if self.path == "/v1/balance":
             if not self.authorized(CUSTOMER):
                 return self.send_json(401, {"error": {"message": "bad key"}})
@@ -710,6 +735,28 @@ def run() -> None:
         assert typed_profile_rows[0]["retrying"] is False
         assert STATE.typed_missing_profile_calls == 1
 
+        placement_log = root / "placement-http-failures.jsonl"
+        placement_client = Client(base, placement_log)
+        placement_path = (
+            "/admin/pools/community-qwen7b-0-/placement-decisions"
+            "?since_micros=1&limit=2000"
+        )
+        _, placement = placement_client.request(
+            "GET", placement_path, bearer=ADMIN
+        )
+        assert placement == {
+            "object": "placement_decision_audit",
+            "complete_within_requested_window": True,
+        }
+        placement_rows = [
+            json.loads(line) for line in placement_log.read_text().splitlines()
+        ]
+        assert len(placement_rows) == 1
+        assert placement_rows[0]["status"] == 404
+        assert placement_rows[0]["path"] == placement_path
+        assert placement_rows[0]["typed_weinfer_error"] is False
+        assert placement_rows[0]["retrying"] is True
+
         # The realistic series uses the proven customer client through a
         # SEPARATE entrypoint, so the hash-pinned frozen client remains
         # byte-identical for the armed retention experiment.
@@ -726,6 +773,7 @@ def run() -> None:
             STATE.transient_job_404s.clear()
             STATE.transient_job_poll_404s.clear()
             STATE.transient_profile_404s.clear()
+            STATE.transient_placement_404s.clear()
             STATE.typed_missing_model_calls = 0
             STATE.typed_missing_job_calls = 0
             STATE.typed_missing_profile_calls = 0
@@ -776,7 +824,7 @@ def run() -> None:
         # Re-prove the frozen dependency after exercising the new entrypoint.
         assert hashlib.sha256(
             Path("scripts/public_batch_canary.py").read_bytes()
-        ).hexdigest() == "b2df58252a2333ffa58bcf6bb7227ef7e969f67d7a2bbccc7e0250b1af076cdd"
+        ).hexdigest() == "37a5909aafde440b3c2c41073788f6ff9892e6c5b1cb79651831d2eca3a07320"
         server.shutdown()
         thread.join(timeout=5)
         print(

@@ -34,9 +34,31 @@ ADMISSION_LIMIT_SECONDS = 600
 POLL_BUDGET_SECONDS = DEADLINE_SECONDS + 600
 POLL_CONCURRENCY = 8
 POLL_INTERVAL_SECONDS = 60
+PREFLIGHT_FRESHNESS_SECONDS = 300
+REGISTERED_BACKLOG_TOKENS = 39_218_400
+ACQUISITION_LIMIT_MICROS = 600_000_000
+PLACEMENT_AUDIT_LIMIT = 2_000
+PLACEMENT_AUDIT_COMPACT_ROW_KEYS = frozenset(
+    {
+        "pool",
+        "at_micros",
+        "backlog_tokens",
+        "selected_sku",
+        "attempt_outcome",
+        "plan_id",
+        "attempt_ordinal",
+        "matched_pod_count",
+        "pod_id",
+        "pod_created_at_micros",
+        "launch_contract_digest",
+    }
+)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ANCHOR_SHA256 = "2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205"
 ACCEPTED_MARKER = "300/300 accepted; row-0 replay identical"
+ARMING_RECEIPT_ENV = "WEINFER_STACKED_N24_ARMING_RECEIPT"
+ARMING_RECEIPT_WAIT_SECONDS = 10
+ARMING_RECEIPT_MAX_AGE_SECONDS = 30
 
 
 def sha256(path: Path) -> str:
@@ -45,6 +67,232 @@ def sha256(path: Path) -> str:
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
+
+
+def require_pre_spend_receipt(
+    path: Path, *, variant: str, run_prefix: str, expected_sha256: str
+) -> tuple[dict[str, Any], bytes, str]:
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("pre-spend receipt is not JSON") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("pre-spend receipt is not an object")
+    workload = value.get("workload", {})
+    scheduling = value.get("scheduling", {})
+    observer = value.get("observer", {})
+    predictions = value.get("predictions", {})
+    ceilings = value.get("ceilings", {})
+    captured_at = value.get("captured_at_epoch")
+    now = int(time.time())
+    if (
+        value.get("object") != "stacked_n24_pre_spend_receipt_v1"
+        or value.get("variant") != variant
+        or value.get("run_id") != run_prefix
+        or workload.get("sha256") != expected_sha256
+        or workload.get("logical_batches") != BATCHES
+        or workload.get("jobs_per_batch") != JOBS_PER_BATCH
+        or workload.get("deadline_seconds") != DEADLINE_SECONDS
+        or scheduling.get("admission_limit_seconds") != ADMISSION_LIMIT_SECONDS
+        or scheduling.get("boot_fraction") != "0.04"
+        or scheduling.get("boot_seed_seconds") != 452
+        or scheduling.get("policy_tokens_per_second") != 4_000
+        or not isinstance(value.get("registered_commit"), str)
+        or len(value["registered_commit"]) != 40
+        or not all(character in "0123456789abcdef" for character in value["registered_commit"])
+        or not isinstance(captured_at, int)
+        or captured_at <= 0
+        or captured_at > now + 5
+        or now - captured_at > PREFLIGHT_FRESHNESS_SECONDS
+        or not isinstance(observer.get("pre_launch_epoch"), int)
+        or observer["pre_launch_epoch"] <= 0
+        or predictions.get("rows") != 9
+        or predictions.get("runtime_rate_authority")
+        != "managed_pods.provider_rate_micro_per_hour"
+        or predictions.get("rate_parameter_domain_micro_usd_per_hour")
+        != [1, 400_000]
+        or predictions.get("all_create_rates_under_the_ceiling_are_precommitted")
+        is not True
+        or ceilings.get("gpu_create_usd_per_hour") != "0.40"
+        or ceilings.get("gpu_cumulative_usd") != "1.00"
+        or ceilings.get("control_plane_create_usd_per_hour") != "0.10"
+    ):
+        raise RuntimeError("pre-spend receipt does not bind this registered series")
+    expected_shape = "full_nine_row_queue" if variant == "anchor" else "target_only"
+    if value.get("rendered_environment", {}).get("bootstrap_shape") != expected_shape:
+        raise RuntimeError("pre-spend receipt bootstrap shape differs from this series")
+    registered_sources = value.get("registered_sources")
+    if not isinstance(registered_sources, dict):
+        raise RuntimeError("pre-spend receipt has no registered source authorities")
+    source_authorities = {
+        "product/scripts/arm_stacked_n24_admit_launchd.py": (
+            PROJECT_ROOT / "scripts/arm_stacked_n24_admit_launchd.py"
+        ),
+        "product/scripts/stacked_n24_admit.py": Path(__file__).resolve(),
+        "product/scripts/public_batch_canary.py": (
+            PROJECT_ROOT / "scripts/public_batch_canary.py"
+        ),
+    }
+    if variant == "realistic":
+        source_authorities["product/scripts/realistic_agent_batch_canary.py"] = (
+            PROJECT_ROOT / "scripts/realistic_agent_batch_canary.py"
+        )
+    for relative, source_path in source_authorities.items():
+        if registered_sources.get(relative) != sha256(source_path):
+            raise RuntimeError(
+                f"pre-spend receipt does not bind current source bytes: {relative}"
+            )
+    return value, raw, hashlib.sha256(raw).hexdigest()
+
+
+def require_launchd_arming_receipt(
+    *,
+    variant: str,
+    public_base: str,
+    credentials: Path,
+    run_prefix: str,
+    artifact_root: Path,
+    pre_spend_path: Path,
+    pre_spend: dict[str, Any],
+    pre_spend_sha256: str,
+) -> tuple[dict[str, Any], bytes, str]:
+    """Hold all customer demand until the source-pinned armer proves one-shot start.
+
+    The armer has to start this process before launchd can prove it running.  The
+    coordinator therefore waits here, before creating its artifact root or
+    issuing a request, until the armer atomically publishes the receipt.  This
+    closes the otherwise dangerous race where a failed arming proof could leave
+    durable queued demand capable of buying a GPU without an arming receipt.
+    """
+
+    expected_label = f"com.weinfer.{run_prefix}.stacked-n24-admit"
+    if os.environ.get("XPC_SERVICE_NAME") != expected_label:
+        raise RuntimeError(
+            "coordinator must run under the exact registered launchd label"
+        )
+    receipt_text = os.environ.get(ARMING_RECEIPT_ENV, "")
+    receipt_path = Path(receipt_text)
+    if not receipt_text or not receipt_path.is_absolute():
+        raise RuntimeError("coordinator arming-receipt gate path is absent or relative")
+
+    deadline = time.monotonic() + ARMING_RECEIPT_WAIT_SECONDS
+    while not os.path.lexists(receipt_path):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "coordinator arming receipt did not appear before the demand gate timed out"
+            )
+        time.sleep(0.05)
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise RuntimeError("coordinator arming receipt is not an immutable regular file")
+    if (receipt_path.stat().st_mode & 0o777) != 0o600:
+        raise RuntimeError("coordinator arming receipt is not private 0600")
+    try:
+        raw = receipt_path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("coordinator arming receipt is not readable JSON") from error
+    if not isinstance(value, dict):
+        raise RuntimeError("coordinator arming receipt is not an object")
+
+    registered_sources = pre_spend.get("registered_sources", {})
+    armer_path = PROJECT_ROOT / "scripts/arm_stacked_n24_admit_launchd.py"
+    armer_sha256 = sha256(armer_path)
+    coordinator_sha256 = sha256(Path(__file__).resolve())
+    identities = value.get("coordinator_argv_identities")
+    armed_at = value.get("armed_at_epoch")
+    now = int(time.time())
+    proof_digests = (
+        value.get("launchctl_proof_sha256"),
+        value.get("launchctl_recheck_proof_sha256"),
+    )
+    if (
+        value.get("object")
+        != "stacked_n24_admit_launchd_arming_receipt_v1"
+        or value.get("attests") != "launchd_one_shot_started"
+        or value.get("does_not_attest")
+        != "coordinator_completion_or_series_success"
+        or value.get("label") != expected_label
+        or value.get("teardown_required_bootout_target")
+        != f"gui/{os.getuid()}/{expected_label}"
+        or value.get("job_remains_loaded_after_coordinator_exit") is not True
+        or value.get("launchctl_submit_or_kickstart_used") is not False
+        or value.get("coordinator_blocks_before_arming_receipt") is not True
+        or value.get("coordinator_arming_gate_seconds")
+        != ARMING_RECEIPT_WAIT_SECONDS
+        or value.get("armer_nominal_proof_budget_seconds") != 5.0
+        or value.get("armer_proof_execution_margin_seconds") != 2
+        or value["armer_nominal_proof_budget_seconds"]
+        + value["armer_proof_execution_margin_seconds"]
+        >= ARMING_RECEIPT_WAIT_SECONDS
+        or value.get("credentials_file_contents_read") is not False
+        or value.get("credentials_file_digest_recorded") is not False
+        or value.get("launchctl_proof_text_persisted") is not False
+        or value.get("coordinator_source_sha256") != coordinator_sha256
+        or value.get("armer_source_sha256") != armer_sha256
+        or registered_sources.get(
+            "product/scripts/arm_stacked_n24_admit_launchd.py"
+        )
+        != armer_sha256
+        or value.get("pre_spend_receipt_sha256") != pre_spend_sha256
+        or type(armed_at) is not int
+        or armed_at <= 0
+        or armed_at > now + 5
+        or now - armed_at > ARMING_RECEIPT_MAX_AGE_SECONDS
+        or not all(
+            isinstance(digest, str)
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            for digest in proof_digests
+        )
+        or not isinstance(identities, dict)
+    ):
+        raise RuntimeError("coordinator arming receipt is incoherent")
+    try:
+        paths_match = (
+            Path(str(identities.get("credentials_file_path"))).resolve()
+            == credentials
+            and Path(str(identities.get("artifact_root"))).resolve()
+            == artifact_root
+            and Path(str(identities.get("pre_spend_receipt"))).resolve()
+            == pre_spend_path
+            and Path(str(value.get("pre_spend_receipt_path"))).resolve()
+            == pre_spend_path
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RuntimeError("coordinator arming receipt paths are incoherent") from error
+    if not paths_match or identities.get("variant") != variant or identities.get(
+        "public_base"
+    ) != public_base or identities.get("run_prefix") != run_prefix:
+        raise RuntimeError("coordinator arming receipt binds a different series")
+    return value, raw, hashlib.sha256(raw).hexdigest()
+
+
+def write_once_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    if path.exists() or temporary.exists():
+        raise RuntimeError(f"refusing to replace immutable artifact: {path}")
+    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        written = os.write(descriptor, payload)
+        if written != len(payload):
+            raise RuntimeError(
+                f"short artifact write for {path}: {written}/{len(payload)} bytes"
+            )
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.link(temporary, path)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def require_complete_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -229,13 +477,138 @@ def cache_sample(
     }
 
 
+def require_placement_audit(
+    value: object, *, pool: str, since_micros: int
+) -> list[dict[str, Any]]:
+    if not isinstance(value, dict):
+        raise RuntimeError("placement decision audit is not an object")
+    rows = value.get("rows")
+    if (
+        value.get("object") != "placement_decision_audit"
+        or value.get("pool") != pool
+        or value.get("since_micros") != since_micros
+        or value.get("limit") != PLACEMENT_AUDIT_LIMIT
+        or value.get("compact") is not True
+        or value.get("complete_within_requested_window") is not True
+        or value.get("authority")
+        != "append_only_scheduler_observation_never_placement_input"
+        or not isinstance(rows, list)
+        or not rows
+        or len(rows) > PLACEMENT_AUDIT_LIMIT
+        or not all(isinstance(row, dict) for row in rows)
+        or any(set(row) != PLACEMENT_AUDIT_COMPACT_ROW_KEYS for row in rows)
+    ):
+        raise RuntimeError("placement decision audit is incomplete or incoherent")
+    timestamps = [row.get("at_micros") for row in rows]
+    if (
+        not all(
+            isinstance(at_micros, int) and at_micros >= since_micros
+            for at_micros in timestamps
+        )
+        or timestamps != sorted(timestamps)
+        or any(row.get("pool") != pool for row in rows)
+    ):
+        raise RuntimeError("placement decision audit chronology is incoherent")
+    return rows
+
+
+def classify_acquisition(
+    *, rows: list[dict[str, Any]], pod_identity: dict[str, Any], variant: str
+) -> dict[str, Any]:
+    attempts = [row for row in rows if row.get("attempt_outcome") == "attempting"]
+    if not attempts:
+        raise RuntimeError("placement decision audit carries no durable attempting row")
+    if any(
+        row.get("backlog_tokens") != REGISTERED_BACKLOG_TOKENS
+        or not isinstance(row.get("plan_id"), str)
+        or not row["plan_id"]
+        or not isinstance(row.get("attempt_ordinal"), int)
+        or row["attempt_ordinal"] < 0
+        or not isinstance(row.get("selected_sku"), str)
+        or not row["selected_sku"]
+        for row in attempts
+    ):
+        raise RuntimeError("placement attempt was not made against the full registered backlog")
+    pod_id = pod_identity["pod_id"]
+    matched = [row for row in attempts if row.get("pod_id") == pod_id]
+    if len(matched) != 1:
+        raise RuntimeError(
+            "terminal pod must match exactly one durable placement attempt, "
+            f"got {len(matched)}"
+        )
+    success = matched[0]
+    if (
+        success.get("matched_pod_count") != 1
+        or success.get("selected_sku") != pod_identity["gpu_sku"]
+        or success.get("launch_contract_digest")
+        != pod_identity["launch_contract_digest"]
+        or not isinstance(success.get("pod_created_at_micros"), int)
+        or success["pod_created_at_micros"] <= 0
+    ):
+        raise RuntimeError("terminal pod does not match its durable placement identity")
+    first_attempt = attempts[0]
+    created_at = success["pod_created_at_micros"]
+    duration = created_at - first_attempt["at_micros"]
+    if duration < 0:
+        raise RuntimeError("successful provider-create adoption predates its first attempt")
+    other_pods = sorted(
+        {
+            row["pod_id"]
+            for row in attempts
+            if isinstance(row.get("pod_id"), str) and row["pod_id"] != pod_id
+        }
+    )
+    within_limit = duration <= ACQUISITION_LIMIT_MICROS and not other_pods
+    outcomes_for_success = sorted(
+        {
+            str(row.get("attempt_outcome"))
+            for row in rows
+            if row.get("plan_id") == success["plan_id"]
+            and row.get("attempt_ordinal") == success["attempt_ordinal"]
+            and row.get("attempt_outcome")
+            in {"adopted", "recovered-adopted", "resolved-adopted"}
+        }
+    )
+    return {
+        "status": "continuity_eligible" if within_limit else "acquisition_regime",
+        "continuity_headline_eligible": within_limit if variant == "anchor" else None,
+        "clock_basis": "gateway_database_micros_for_both_endpoints",
+        "start_basis": "first durable attempting row after the pre-spend observer epoch",
+        "end_basis": (
+            "managed_pods.created_at_micros for the terminal pod's exact plan and ordinal"
+        ),
+        "first_attempt_at_micros": first_attempt["at_micros"],
+        "successful_create_adopted_at_micros": created_at,
+        "duration_micros": duration,
+        "limit_micros": ACQUISITION_LIMIT_MICROS,
+        "terminal_pod_id": pod_id,
+        "terminal_gpu_sku": pod_identity["gpu_sku"],
+        "successful_plan_id": success["plan_id"],
+        "successful_attempt_ordinal": success["attempt_ordinal"],
+        "successful_outcome_rows": outcomes_for_success,
+        "durable_success_basis": (
+            "managed_pod_adoption_plus_outcome_row"
+            if outcomes_for_success
+            else "managed_pod_adoption; outcome row absent and never inferred"
+        ),
+        "attempt_count": len(attempts),
+        "definitive_rejections_before_success": sum(
+            row.get("attempt_outcome") == "definitive-rejection"
+            and isinstance(row.get("at_micros"), int)
+            and row["at_micros"] <= created_at
+            for row in rows
+        ),
+        "other_created_pods_in_window": other_pods,
+    }
+
+
 def main() -> int:
-    if len(sys.argv) != 6:
+    if len(sys.argv) != 7:
         raise SystemExit(
             "usage: stacked_n24_admit.py <anchor|realistic> <public-base> "
-            "<credentials-file> <run-prefix> <artifact-root>"
+            "<credentials-file> <run-prefix> <artifact-root> <pre-spend-receipt>"
         )
-    variant, base, credentials_text, run_prefix, root_text = sys.argv[1:]
+    variant, base, credentials_text, run_prefix, root_text, pre_spend_text = sys.argv[1:]
     if variant not in {"anchor", "realistic"}:
         raise SystemExit("variant must be anchor or realistic")
     if (
@@ -247,7 +620,27 @@ def main() -> int:
     credentials = Path(credentials_text).resolve()
     if not credentials.is_file():
         raise SystemExit(f"credentials file is absent: {credentials}")
+    expected_sha256 = (
+        ANCHOR_SHA256 if variant == "anchor" else REALISTIC_AGENT_WORKLOAD_SHA256
+    )
+    pre_spend_path = Path(pre_spend_text).resolve()
+    pre_spend, pre_spend_raw, pre_spend_sha256 = require_pre_spend_receipt(
+        pre_spend_path,
+        variant=variant,
+        run_prefix=run_prefix,
+        expected_sha256=expected_sha256,
+    )
     root = Path(root_text).resolve()
+    arming, arming_raw, arming_sha256 = require_launchd_arming_receipt(
+        variant=variant,
+        public_base=base,
+        credentials=credentials,
+        run_prefix=run_prefix,
+        artifact_root=root,
+        pre_spend_path=pre_spend_path,
+        pre_spend=pre_spend,
+        pre_spend_sha256=pre_spend_sha256,
+    )
     root.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(root, 0o700)
     lock = root / "one-shot.lock"
@@ -256,15 +649,17 @@ def main() -> int:
     except FileExistsError as error:
         raise SystemExit(f"series identity already started: {lock}") from error
 
+    sealed_pre_spend_path = root / "pre-spend-receipt.json"
+    write_once_bytes(sealed_pre_spend_path, pre_spend_raw)
+    sealed_arming_path = root / "launchd-arming-receipt.json"
+    write_once_bytes(sealed_arming_path, arming_raw)
+
     batches_root = root / "batches"
     logs_root = root / "logs"
     keys_root = root / "keys"
     cache_root = root / "cache-samples"
     for path in (batches_root, logs_root, keys_root, cache_root):
         path.mkdir(mode=0o700)
-    expected_sha256 = (
-        ANCHOR_SHA256 if variant == "anchor" else REALISTIC_AGENT_WORKLOAD_SHA256
-    )
     canary = (
         PROJECT_ROOT / "scripts/public_batch_canary.py"
         if variant == "anchor"
@@ -286,6 +681,17 @@ def main() -> int:
         "poll_concurrency_per_batch": POLL_CONCURRENCY,
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         "credentials_path": str(credentials),
+        "pre_spend_receipt_source_path": str(pre_spend_path),
+        "pre_spend_receipt_relative": str(sealed_pre_spend_path.relative_to(root)),
+        "pre_spend_receipt_sha256": pre_spend_sha256,
+        "launchd_arming_receipt_source_path": os.environ[ARMING_RECEIPT_ENV],
+        "launchd_arming_receipt_relative": str(sealed_arming_path.relative_to(root)),
+        "launchd_arming_receipt_sha256": arming_sha256,
+        "launchd_label": arming["label"],
+        "launchd_teardown_required_bootout_target": arming[
+            "teardown_required_bootout_target"
+        ],
+        "registered_commit": pre_spend["registered_commit"],
         "started_at_epoch_micros": time.time_ns() // 1_000,
     }
     atomic_json(root / "source-receipt.json", source_receipt)
@@ -475,6 +881,83 @@ def main() -> int:
         customer_charge_micro_usd = sum(
             int(result["customer_charge_micro_usd"]) for result in results
         )
+        customer_conservation = {
+            "credits_micro_usd": sum(
+                int(result["customer_balance"]["credits_micro_usd"])
+                for result in results
+            ),
+            "spent_micro_usd": sum(
+                int(result["customer_balance"]["spent_micro_usd"])
+                for result in results
+            ),
+            "reserved_micro_usd": sum(
+                int(result["customer_balance"]["reserved_micro_usd"])
+                for result in results
+            ),
+            "available_micro_usd": sum(
+                int(result["customer_balance"]["available_micro_usd"])
+                for result in results
+            ),
+        }
+        if (
+            customer_conservation["spent_micro_usd"]
+            != customer_charge_micro_usd
+            or customer_conservation["credits_micro_usd"]
+            != customer_conservation["spent_micro_usd"]
+            + customer_conservation["reserved_micro_usd"]
+            + customer_conservation["available_micro_usd"]
+        ):
+            raise RuntimeError("aggregate customer conservation is not exact")
+        conservation_document = {
+            "object": "stacked_n24_customer_conservation_v1",
+            "variant": variant,
+            "run_prefix": run_prefix,
+            "organizations": BATCHES,
+            "customer": {
+                **customer_conservation,
+                "exact": True,
+            },
+            "basis": (
+                "sum of all 24 independently terminal customer balances; each "
+                "tenant was already required to conserve before aggregation"
+            ),
+        }
+        conservation_path = root / "customer-conservation.json"
+        atomic_json(conservation_path, conservation_document)
+        pod_identity = {
+            key: first_sample[key]
+            for key in (
+                "pod_id",
+                "pool",
+                "model",
+                "gpu_sku",
+                "launch_contract_digest",
+                "provider_rate_micro_per_hour",
+            )
+        }
+        since_micros = int(pre_spend["observer"]["pre_launch_epoch"]) * 1_000_000
+        _, placement_document = client.request(
+            "GET",
+            f"/admin/pools/{pod_identity['pool']}/placement-decisions"
+            f"?since_micros={since_micros}&limit={PLACEMENT_AUDIT_LIMIT}"
+            "&compact=true",
+            bearer=admin_key,
+        )
+        placement_path = root / "placement-decisions.json"
+        atomic_json(placement_path, placement_document)
+        placement_rows = require_placement_audit(
+            placement_document,
+            pool=pod_identity["pool"],
+            since_micros=since_micros,
+        )
+        acquisition = classify_acquisition(
+            rows=placement_rows,
+            pod_identity=pod_identity,
+            variant=variant,
+        )
+        acquisition["placement_decisions_sha256"] = sha256(placement_path)
+        acquisition["placement_decision_rows"] = len(placement_rows)
+        atomic_json(root / "acquisition-classification.json", acquisition)
         terminal = {
             "status": "complete",
             "variant": variant,
@@ -488,23 +971,18 @@ def main() -> int:
             "completion_tokens": completion_tokens,
             "billable_tokens": prompt_tokens + completion_tokens,
             "customer_charge_micro_usd": customer_charge_micro_usd,
+            "customer_conservation_relative": str(
+                conservation_path.relative_to(root)
+            ),
+            "customer_conservation_sha256": sha256(conservation_path),
             "first_accept_epoch_micros": first_accept,
             "last_accept_epoch_micros": last_accept,
             "acceptance_span_micros": admission_span,
             "admission_limit_seconds": ADMISSION_LIMIT_SECONDS,
             "provider_created_at_micros": provider_created,
             "accepted_before_provider_create": True,
-            "pod_identity": {
-                key: first_sample[key]
-                for key in (
-                    "pod_id",
-                    "pool",
-                    "model",
-                    "gpu_sku",
-                    "launch_contract_digest",
-                    "provider_rate_micro_per_hour",
-                )
-            },
+            "pod_identity": pod_identity,
+            "acquisition_classification": acquisition,
             "cache_observation_order": [
                 sample["logical_batch_index"] for sample in samples
             ],
