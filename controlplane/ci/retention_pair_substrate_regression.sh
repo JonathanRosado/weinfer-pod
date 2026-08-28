@@ -21,7 +21,7 @@ import json
 import sys
 
 value = json.load(open(sys.argv[1]))
-assert value["WEINFER_GATEWAY_SHA256"] == "57d84dd409ebb0e053eb01beaaffc91a6ec32e4c26e15dc1d6387fdb11601e3c"
+assert value["WEINFER_GATEWAY_SHA256"] == "0b4748249ce3e3d968f26ae6b35ed9d32c09464feed9d25f32a10e964adae557"
 assert value["WEINFER_BOOTSTRAP_MODE"] == "1"
 hardware = json.loads(value["WEINFER_BOOTSTRAP_HARDWARE"])
 assert len(hardware) == 9
@@ -51,4 +51,4 @@ if bash "$PREFLIGHT" "$test_tmp/tampered.sh" > "$test_tmp/tampered.out" 2> "$tes
 fi
 grep -q 'retention substrate refused: deploy sha' "$test_tmp/tampered.err"
 
-echo "RETENTION SUBSTRATE REGRESSION PASS: frozen v0.9/A4500 accepted; live v0.20/multi-SKU and tamper refused"
+echo "RETENTION SUBSTRATE REGRESSION PASS: frozen v0.9/A4500 accepted; live v0.21/multi-SKU and tamper refused"

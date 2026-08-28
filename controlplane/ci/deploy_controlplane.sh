@@ -101,8 +101,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:693db10834a098d0267949098edc334593c5e418c3f8e6b5b944ee41d5b741de"
-GW_TAG="gateway-v0.20.0"
-GW_SHA="57d84dd409ebb0e053eb01beaaffc91a6ec32e4c26e15dc1d6387fdb11601e3c"
+GW_TAG="gateway-v0.21.0"
+GW_SHA="0b4748249ce3e3d968f26ae6b35ed9d32c09464feed9d25f32a10e964adae557"
 WORKER_TAG="worker-v0.6.0"
 WORKER_SHA="0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -210,6 +210,8 @@ PY
 # backlog.  Throughput and fixed-cost priors are independent and neither
 # can affect admission, deadline feasibility, promotion, or a delivered-cost
 # claim.  Catalog presence is only a hint:
+# the provider's overall availability label changes scarcity timing but does
+# not exclude a structurally compatible row.
 # a definitive create denial falls through to the next row in the
 # same plan.  A SKU earns delivered-cost facts only from its own later
 # sealed traversal.
