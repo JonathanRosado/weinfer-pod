@@ -5,7 +5,55 @@
 # post-breach resurrection swept, and triple zero-live confirmation.
 # Zero spend, zero real provider calls.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELF="${SCRIPT_DIR}/$(basename "$0")"
+cd "${SCRIPT_DIR}/.."
+
+# Every scenario below intentionally shares one fake-provider port and a fixed
+# set of /tmp paths.  Concurrent harnesses would therefore corrupt each
+# other's state and can leave a failure looking like a product regression.
+# Refuse a second owner explicitly before either harness can touch those paths.
+REGRESSION_LOCK="${TMPDIR:-/tmp}/weinfer-watchdog-regression.lock"
+if ! mkdir "$REGRESSION_LOCK" 2>/dev/null; then
+  echo "WATCHDOG REGRESSION REFUSED: another run owns $REGRESSION_LOCK" >&2
+  exit 73
+fi
+
+cleanup() {
+  local child
+  while IFS= read -r child; do
+    [ -n "$child" ] && kill "$child" 2>/dev/null || true
+  done < <(jobs -pr)
+  wait 2>/dev/null || true
+  rmdir "$REGRESSION_LOCK" 2>/dev/null || true
+}
+on_signal() {
+  local code="$1"
+  trap - EXIT
+  cleanup
+  exit "$code"
+}
+trap cleanup EXIT
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM HUP
+
+# Red for the bug class: while this run owns the global fixtures, a second
+# invocation must fail as contention (73), never enter a scenario and emit a
+# plausible FAIL about the observer under test.
+set +e
+LOCK_REFUSAL="$(bash "$SELF" 2>&1)"
+LOCK_REFUSAL_CODE=$?
+set -e
+[ "$LOCK_REFUSAL_CODE" = "73" ] || {
+  echo "FAIL: concurrent watchdog regression exited $LOCK_REFUSAL_CODE, expected 73"
+  echo "$LOCK_REFUSAL"
+  exit 1
+}
+case "$LOCK_REFUSAL" in
+  *"WATCHDOG REGRESSION REFUSED: another run owns "*) ;;
+  *) echo "FAIL: concurrent watchdog regression refusal was not explicit"; echo "$LOCK_REFUSAL"; exit 1 ;;
+esac
+echo "ok: regression ownership — concurrent run refused explicitly before shared fixtures"
 
 FAKE="${FAKE:-infra/controlplane/ci/fake_runpod_official.py}"
 WATCHDOG="${WATCHDOG:-scripts/gpu_watchdog.sh}"
@@ -15,7 +63,6 @@ CTRL="http://127.0.0.1:${PORT}/control"
 PREFIX="weinfer-community-qwen7b-0-"
 
 python3 "$FAKE" "$PORT" & FAKE_PID=$!
-trap 'kill $FAKE_PID 2>/dev/null' EXIT
 sleep 1
 rm -f /tmp/fake-official-deletes.log /tmp/wd-state.json /tmp/wd.log
 printf 'fake-key' > /tmp/wd-key

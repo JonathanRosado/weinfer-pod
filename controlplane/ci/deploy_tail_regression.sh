@@ -128,6 +128,8 @@ assert body["cpuFlavorIds"] == [
 assert body["cpuFlavorPriority"] == "availability", body
 assert body["vcpuCount"] == 2, body
 assert body["env"]["WEINFER_CONTROLPLANE_STORAGE_MODE"] == "network-volume", body
+assert body["env"]["WEINFER_PROBE_BUDGET"] == "360", body
+assert body["env"]["WEINFER_PROBE_DELAY_SECS"] == "10", body
 assert isinstance(body.get("networkVolumeId"), str) and body["networkVolumeId"], body
 assert "volumeInGb" not in body, body
 PY
@@ -155,6 +157,8 @@ python3 - /tmp/fake-v1-bodies.jsonl <<'PY'
 import json, sys
 body = json.loads(open(sys.argv[1]).readlines()[-1])
 assert body["env"]["WEINFER_CONTROLPLANE_STORAGE_MODE"] == "run-scoped-pod", body
+assert body["env"]["WEINFER_PROBE_BUDGET"] == "360", body
+assert body["env"]["WEINFER_PROBE_DELAY_SECS"] == "10", body
 assert body["volumeInGb"] == 10, body
 assert body["volumeMountPath"] == "/workspace", body
 assert "networkVolumeId" not in body, body

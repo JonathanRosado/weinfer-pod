@@ -48,6 +48,27 @@ if not raw.isascii() or not raw.isdigit() or int(raw) <= 0:
     )
 PY
 
+# Worker readiness is the LOCAL engine-health registration handshake, not a
+# provider status bit.  Two paid CUDA-13 RTX 3090 pods reached the old binary
+# default (120 probes x 10s = 20 minutes) with every job still pending.  A third
+# reached the registered 240-by-10-second allowance with the same zero-service
+# result.  The deployed environment now carries an explicit 60-minute bound to
+# keep the next cold pull alive without changing the scheduler's boot prior or
+# any customer deadline; the independent cumulative watchdog remains the spend
+# authority.
+READY_PROBE_BUDGET="${WEINFER_PROBE_BUDGET:-360}"
+READY_PROBE_DELAY_SECS="${WEINFER_PROBE_DELAY_SECS:-10}"
+python3 - "$READY_PROBE_BUDGET" "$READY_PROBE_DELAY_SECS" <<'PY'
+import sys
+
+for name, raw in (
+    ("WEINFER_PROBE_BUDGET", sys.argv[1]),
+    ("WEINFER_PROBE_DELAY_SECS", sys.argv[2]),
+):
+    if not raw.isascii() or not raw.isdigit() or int(raw) <= 0:
+        raise SystemExit(f"{name} must be a positive base-10 integer, got {raw!r}")
+PY
+
 # Cold-start amortization target. Production keeps the shipped 20% default;
 # a registered deep-backlog measurement may lower it so the full intended
 # backlog is durably visible before acquisition. This affects only the cold
@@ -101,8 +122,8 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:693db10834a098d0267949098edc334593c5e418c3f8e6b5b944ee41d5b741de"
-GW_TAG="gateway-v0.23.0"
-GW_SHA="8730d975645fc4136c1c1ef477bc0740da7c068b729ace27d6cb8991b212268b"
+GW_TAG="gateway-v0.24.0"
+GW_SHA="cc97e659266a3d2be00ce579a0effea7cc53bbc80c95612b897497fc6399fbcd"
 WORKER_TAG="worker-v0.6.0"
 WORKER_SHA="0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
@@ -287,6 +308,8 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   CONCURRENCY="$CONCURRENCY" ALLOC_CONF="$ALLOC_CONF" \
   BOOTSTRAP_HARDWARE="$BOOTSTRAP_HARDWARE" \
   DEMAND_QUIET_CYCLES="$DEMAND_QUIET_CYCLES" \
+  READY_PROBE_BUDGET="$READY_PROBE_BUDGET" \
+  READY_PROBE_DELAY_SECS="$READY_PROBE_DELAY_SECS" \
   BOOT_FRACTION="$BOOT_FRACTION" \
   POLICY_BOOT_SEED_SECS="$POLICY_BOOT_SEED_SECS" \
   POLICY_TOKENS_PER_SEC="$POLICY_TOKENS_PER_SEC" \
@@ -304,6 +327,10 @@ env = {
     # WEINFER_PUBLIC_BASE derived in-container from RUNPOD_POD_ID.
     "WEINFER_MANAGED": "1",
     "WEINFER_RESIDENCY": "1",
+    # Bounded cold-start liveness allowance.  This is recorded separately
+    # from the planner's boot prior and never widens a customer deadline.
+    "WEINFER_PROBE_BUDGET": e["READY_PROBE_BUDGET"],
+    "WEINFER_PROBE_DELAY_SECS": e["READY_PROBE_DELAY_SECS"],
     # Demand-aware retention defaults to three complete 60s empty-horizon
     # observations.  The registered A/B control may raise this value until
     # the gateway's one-boot parity cap becomes the effective TTL.
@@ -623,6 +650,7 @@ echo "  credentials:  ${CRED_FILE}"
 echo "  retention:    demand_quiet_cycles=${DEMAND_QUIET_CYCLES}"
 echo "  cold target:  boot_fraction=${BOOT_FRACTION}"
 echo "  cold inputs:  boot_seed=${POLICY_BOOT_SEED_SECS}s policy_tps=${POLICY_TOKENS_PER_SEC}"
+echo "  readiness:    ${READY_PROBE_BUDGET} probes x ${READY_PROBE_DELAY_SECS}s (bounded)"
 if [ "$CONTROLPLANE_STORAGE_MODE" = "network-volume" ]; then
   echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr + network volume ~\$0.70/mo — founder-visible, deliberate"
 else

@@ -59,6 +59,90 @@ os.replace(tmp, path)
     "$rc" "$started" "$ended" "$detail"
 }
 
+# An operator can fail before its ordinary post-batch classifier runs. The
+# window owns the retry-ladder contract, so it may normalize raw exit 1 to the
+# capacity/no-spend exit 42 only from a complete, ordered deploy transcript:
+# the create endpoint definitively refused capacity, cleanup ran, zero live
+# pods were proven, and no created-pod or unresolved-cleanup marker exists.
+# Anything missing or contradictory stays terminal. The proof is persisted
+# beside the attempt so the raw operator exit is never erased by normalization.
+normalize_clean_deploy_capacity_refusal() {
+  local raw_rc="$1" arm log proof
+  [ "$raw_rc" = "1" ] || return 1
+  proof="$ROOT/deploy-capacity-classification.json"
+  [ ! -e "$proof" ] || return 1
+  for arm in arm-a arm-b; do
+    log="$ROOT/$arm/deploy.log"
+    [ -f "$log" ] || continue
+    if python3 - "$log" "$proof" "$arm" "$PAIR_ID" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+log_path, proof_path, arm, pair_id = sys.argv[1:]
+raw = Path(log_path).read_bytes()
+if not raw or len(raw) > 1024 * 1024:
+    raise SystemExit(1)
+text = raw.decode("utf-8", errors="replace")
+folded = text.casefold()
+capacity = re.search(
+    r"runpod post /pods http [45][0-9]{2}:.*(?:"
+    r"there are no longer any instances available with the requested specifications"
+    r"|no instances available)",
+    folded,
+)
+failed = folded.find("launch failed — cleaning up (volume kept as the durable asset)")
+zero_live = folded.find("zero-live verification: 0 live pods remain")
+forbidden = (
+    "cleanup failed",
+    "cleanup unresolved",
+    "pod may be live and billing",
+    "state persisted:",
+    "control plane live:",
+)
+created = re.search(r"(?m)^pod [a-z0-9]+ created at epoch [0-9]+$", folded)
+if (
+    capacity is None
+    or failed < capacity.start()
+    or zero_live < failed
+    or any(marker in folded for marker in forbidden)
+    or created is not None
+):
+    raise SystemExit(1)
+value = {
+    "object": "retention_pair_deploy_capacity_classification",
+    "pair_id": pair_id,
+    "arm": arm,
+    "raw_operator_exit_code": 1,
+    "normalized_exit_code": 42,
+    "classification": "clean_deploy_time_capacity_refusal",
+    "deploy_log_sha256": hashlib.sha256(raw).hexdigest(),
+    "deploy_log_bytes": len(raw),
+    "create_refusal_observed": True,
+    "cleanup_completed": True,
+    "zero_live_verified": True,
+    "created_pod_observed": False,
+    "unresolved_cleanup_observed": False,
+}
+temporary = proof_path + ".tmp"
+with open(temporary, "w") as handle:
+    json.dump(value, handle, sort_keys=True, indent=2)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, proof_path)
+PY
+    then
+      return 0
+    fi
+  done
+  return 1
+}
+
 actual_operator_sha256=$(shasum -a 256 "$OPERATOR" 2>/dev/null | awk '{print $1}')
 if [ "$actual_operator_sha256" != "$EXPECTED_OPERATOR_SHA256" ]; then
   echo "retention window refused: operator sha ${actual_operator_sha256:-missing} != ${EXPECTED_OPERATOR_SHA256}" >&2
@@ -122,12 +206,25 @@ fi
 echo "[window] attempt ${INDEX} starts $(date -u +%FT%TZ): ${PAIR_ID}"
 set +e
 bash "$OPERATOR" "$PAIR_ID" "$ROOT"
-rc=$?
+raw_rc=$?
 set -e
 ended=$(date +%s)
+rc="$raw_rc"
+normalized_deploy_capacity=0
+if normalize_clean_deploy_capacity_refusal "$raw_rc"; then
+  rc=42
+  normalized_deploy_capacity=1
+fi
 case "$rc" in
   0) status="pair_completed"; detail="both arms completed" ;;
-  42) status="definitive_capacity_refusal"; detail="operator proved retryable create truth" ;;
+  42)
+    status="definitive_capacity_refusal"
+    if [ "$normalized_deploy_capacity" = "1" ]; then
+      detail="window proved clean deploy-time capacity refusal; raw operator exit 1; see deploy-capacity-classification.json"
+    else
+      detail="operator proved retryable create truth"
+    fi
+    ;;
   *) status="unexpected_failure"; detail="operator failure is terminal for the ladder" ;;
 esac
 write_result "$status" "$rc" "$NOW" "$ended" "$detail"

@@ -57,7 +57,9 @@ STANDDOWN_FILE="${WEINFER_WATCHDOG_STANDDOWN_FILE:-}"
 CAMPAIGN_SECONDS="${WEINFER_WATCHDOG_CAMPAIGN_SECONDS:?campaign seconds required}"
 CONTROL_PID="${WEINFER_WATCHDOG_CONTROL_PID:-}"
 CONTROL_TELEMETRY_FILE="${WEINFER_WATCHDOG_CONTROL_TELEMETRY_FILE:-}"
+CONTROL_BILLING_FILE="${WEINFER_WATCHDOG_CONTROL_BILLING_FILE:-}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+PYTHON="${WEINFER_WATCHDOG_PYTHON:-python3}"
 
 require_launchd_observer() {
   if [ "${WEINFER_WATCHDOG_ALLOW_UNMANAGED:-}" = "1" ]; then
@@ -71,6 +73,12 @@ require_launchd_observer() {
 }
 
 require_launchd_observer
+[ "${WEINFER_WATCHDOG_ALLOW_UNMANAGED:-}" = "1" ] || {
+  case "$PYTHON" in
+    /*) [ -x "$PYTHON" ] || { echo "watchdog Python authority is not executable" >&2; exit 1; } ;;
+    *) echo "watchdog Python authority must be an absolute executable" >&2; exit 1 ;;
+  esac
+}
 [ -f "$KEY_FILE" ] || { echo "key file missing" >&2; exit 1; }
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 if [ -n "$CONTROL_PID" ]; then
@@ -84,7 +92,7 @@ if [ -n "$CONTROL_PID" ]; then
 fi
 
 # Control-plane lifetime and provider-blind spend authority are distinct.
-CAMPAIGN_DEADLINE_EPOCH=$(python3 - "$EPOCH" "$CAMPAIGN_SECONDS" <<'PY'
+CAMPAIGN_DEADLINE_EPOCH=$("$PYTHON" - "$EPOCH" "$CAMPAIGN_SECONDS" <<'PY'
 import sys
 epoch, seconds = map(int, sys.argv[1:])
 if epoch <= 0 or seconds <= 0:
@@ -102,8 +110,36 @@ list_pods() {
 
 record_control_telemetry() { # pods-json; observation-only, never spend authority
   [ -z "$CONTROL_TELEMETRY_FILE" ] && return 0
-  printf '%s' "$1" | python3 "$SCRIPT_DIR/controlplane_telemetry.py" \
+  printf '%s' "$1" | "$PYTHON" "$SCRIPT_DIR/controlplane_telemetry.py" \
     "$CONTROL_POD" "$CONTROL_TELEMETRY_FILE"
+}
+
+record_control_billing() { # observation-only, never spend authority
+  [ -z "$CONTROL_BILLING_FILE" ] && return 0
+  local billing
+  billing=$(curl -fsS --connect-timeout 10 --max-time 30 --get \
+    "$API/billing/pods" --data-urlencode "podId=$CONTROL_POD" \
+    -H "Authorization: Bearer $(auth)") || return 1
+  printf '%s' "$billing" | "$PYTHON" "$SCRIPT_DIR/controlplane_billing_telemetry.py" \
+    "$CONTROL_POD" "$CONTROL_BILLING_FILE"
+}
+
+CONTROL_BILLING_PID=""
+start_control_billing_observation() {
+  [ -z "$CONTROL_BILLING_FILE" ] && return 0
+  if [ -n "$CONTROL_BILLING_PID" ] && kill -0 "$CONTROL_BILLING_PID" 2>/dev/null; then
+    echo "[watchdog] prior control-plane billing observation still in flight; spend survey is not delayed" >&2
+    return 0
+  fi
+  if [ -n "$CONTROL_BILLING_PID" ]; then
+    wait "$CONTROL_BILLING_PID" 2>/dev/null || true
+  fi
+  (
+    record_control_billing || {
+      echo "[watchdog] control-plane billing observation unavailable; spend survey continues independently" >&2
+    }
+  ) &
+  CONTROL_BILLING_PID=$!
 }
 
 # The provider's collection endpoint can omit a recently terminated
@@ -114,7 +150,7 @@ record_control_telemetry() { # pods-json; observation-only, never spend authorit
 # into the listing so the normal survey handles its current status.
 reconcile_missing() { # listing-json -> enriched listing-json
   local enriched="$1" missing pod_id body code pod_json
-  missing=$(python3 - "$STATE_FILE" "$enriched" <<'PY'
+  missing=$("$PYTHON" - "$STATE_FILE" "$enriched" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
 data = json.loads(sys.argv[2])
@@ -131,7 +167,7 @@ PY
     code="${body##*$'\n'}"
     pod_json="${body%$'\n'*}"
     if [ "$code" = "404" ]; then
-      python3 - "$STATE_FILE" "$pod_id" <<'PY'
+      "$PYTHON" - "$STATE_FILE" "$pod_id" <<'PY'
 import json, sys, time
 path, pid = sys.argv[1:]
 state = json.load(open(path))
@@ -142,7 +178,7 @@ entry["terminal_at"] = min(float(entry.get("terminal_at", time.time())), time.ti
 json.dump(state, open(path, "w"))
 PY
     elif [ "$code" = "200" ]; then
-      enriched=$(python3 - "$enriched" "$pod_json" <<'PY'
+      enriched=$("$PYTHON" - "$enriched" "$pod_json" <<'PY'
 import json, sys
 data, pod = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 if isinstance(data, dict):
@@ -163,7 +199,7 @@ PY
 # survey <pods-json>: updates the persistent ledger, prints
 # "ACCRUED <usd> <live-count> <live-ids...>"
 survey() {
-  python3 - "$STATE_FILE" "$EPOCH" "$PREFIX" "$CONTROL_POD" "$MAX_RATE_USD_HR" "$1" <<'PY'
+  "$PYTHON" - "$STATE_FILE" "$EPOCH" "$PREFIX" "$CONTROL_POD" "$MAX_RATE_USD_HR" "$1" <<'PY'
 import datetime, json, sys
 state_file, epoch, prefix, control, max_rate, raw = (
     sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], float(sys.argv[5]), sys.argv[6])
@@ -234,7 +270,7 @@ delete_verified() { # pod_id -> 0 iff provider says 404/terminal
     code="${body##*$'\n'}"
     [ "$code" = "404" ] && return 0
     if [ "$code" = "200" ]; then
-      printf '%s' "${body%$'\n'*}" | python3 -c "
+      printf '%s' "${body%$'\n'*}" | "$PYTHON" -c "
 import json,sys
 pod=json.load(sys.stdin)
 s=pod.get('status') or pod.get('desiredStatus') or ''
@@ -334,9 +370,9 @@ mark_outage() { # now-epoch; close when blindness could spend the remainder
   if [ -z "$OUTAGE_STARTED" ]; then
     OUTAGE_STARTED="$now"
   fi
-  worst=$(python3 -c "print(float('$LAST_ACCRUED') + float('$MAX_RATE_USD_HR') * max(0, int('$now') - int('$OUTAGE_STARTED')) / 3600.0)")
+  worst=$("$PYTHON" -c "print(float('$LAST_ACCRUED') + float('$MAX_RATE_USD_HR') * max(0, int('$now') - int('$OUTAGE_STARTED')) / 3600.0)")
   echo "[watchdog] outage worst-case \$${worst} (last-known \$${LAST_ACCRUED}, since ${OUTAGE_STARTED})" >&2
-  over=$(python3 -c "print(1 if float('$worst') >= float('$CEILING_USD') else 0)")
+  over=$("$PYTHON" -c "print(1 if float('$worst') >= float('$CEILING_USD') else 0)")
   if [ "$over" = "1" ]; then
     echo "[watchdog] unreadable interval consumed the remaining spend authority" >&2
     breach
@@ -379,8 +415,13 @@ while :; do
     LAST_ACCRUED="$ACCRUED"
     OUTAGE_STARTED=""
     echo "[watchdog] $(date -u +%H:%M:%SZ) cumulative \$${ACCRUED} (${LIVE} live)"
-    OVER=$(python3 -c "print(1 if float('$ACCRUED') >= float('$CEILING_USD') else 0)")
+    OVER=$("$PYTHON" -c "print(1 if float('$ACCRUED') >= float('$CEILING_USD') else 0)")
     [ "$OVER" = "1" ] && breach
+    # Billing observation has its own bounded network request.  Launch it only
+    # AFTER the spend survey and breach decision, in a background child with at
+    # most one request in flight, so it cannot delay this or the next ceiling
+    # enforcement cycle.
+    start_control_billing_observation
   else
     FAILS=$((FAILS + 1))
     echo "[watchdog] provider list FAILED (${FAILS} consecutive) — retrying, never exiting blind" >&2
