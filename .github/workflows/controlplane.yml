@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.22.0
+  GATEWAY_TAG: gateway-v0.23.0
   WORKER_TAG: worker-v0.6.0
 
 jobs:

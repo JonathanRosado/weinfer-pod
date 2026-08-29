@@ -76,11 +76,13 @@ for invalid_boot_fraction in 0 1 nan; do
 done
 
 # The paid exact-identity selector may only narrow the default queue. It must
-# preserve the selected row's typed prior/provenance exactly and may not forge
-# an unknown identity. This render is zero-provider and never reads the real key.
+# preserve the selected row's typed prior/provenance exactly, add only the
+# requested exact CUDA minor pin, and may not forge an unknown identity. This
+# render is zero-provider and never reads the real key.
 ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 4090" \
   WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="12" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_PIN="12.8" \
   bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env-4090.json
 
 python3 - <<'PY'
@@ -91,7 +93,7 @@ targeted = json.load(open("/tmp/evidence-env-4090.json"))
 default_rows = json.loads(default["WEINFER_BOOTSTRAP_HARDWARE"])
 targeted_rows = json.loads(targeted["WEINFER_BOOTSTRAP_HARDWARE"])
 expected = [
-    row for row in default_rows
+    dict(row, cuda_pin="12.8") for row in default_rows
     if row["gpu_sku"] == "NVIDIA GeForce RTX 4090"
     and row["cuda_class"] == "12"
 ]
@@ -110,6 +112,7 @@ PY
 ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 3090" \
   WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="13" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_PIN="13.0" \
   bash "$DEPLOY_SCRIPT" --render-env 2>/dev/null > /tmp/evidence-env-3090-cuda13.json
 
 python3 - <<'PY'
@@ -119,7 +122,7 @@ targeted = json.load(open("/tmp/evidence-env-3090-cuda13.json"))
 default_rows = json.loads(default["WEINFER_BOOTSTRAP_HARDWARE"])
 targeted_rows = json.loads(targeted["WEINFER_BOOTSTRAP_HARDWARE"])
 expected = [
-    row for row in default_rows
+    dict(row, cuda_pin="13.0") for row in default_rows
     if row["gpu_sku"] == "NVIDIA GeForce RTX 3090"
     and row["cuda_class"] == "13"
 ]
@@ -143,8 +146,34 @@ grep -q "must be set together" /tmp/evidence-env-missing-class.log || {
 }
 
 if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 3090" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="13" \
+  bash "$DEPLOY_SCRIPT" --render-env >/tmp/evidence-env-missing-pin.json 2>/tmp/evidence-env-missing-pin.log; then
+  echo "PROFILE EVIDENCE REGRESSION FAIL: class-only selector passed without exact CUDA pin" >&2
+  exit 1
+fi
+grep -q "must be set together" /tmp/evidence-env-missing-pin.log || {
+  echo "PROFILE EVIDENCE REGRESSION FAIL: missing-pin selector lacked named refusal" >&2
+  exit 1
+}
+
+if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
+  WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA GeForce RTX 3090" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="13" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_PIN="12.8" \
+  bash "$DEPLOY_SCRIPT" --render-env >/tmp/evidence-env-wrong-pin.json 2>/tmp/evidence-env-wrong-pin.log; then
+  echo "PROFILE EVIDENCE REGRESSION FAIL: cross-major exact CUDA pin passed" >&2
+  exit 1
+fi
+grep -q "must be an exact CUDA 13 minor" /tmp/evidence-env-wrong-pin.log || {
+  echo "PROFILE EVIDENCE REGRESSION FAIL: cross-major pin lacked named refusal" >&2
+  exit 1
+}
+
+if ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
   WEINFER_BOOTSTRAP_ONLY_GPU_SKU="NVIDIA Imaginary GPU" \
   WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS="12" \
+  WEINFER_BOOTSTRAP_ONLY_CUDA_PIN="12.8" \
   bash "$DEPLOY_SCRIPT" --render-env >/tmp/evidence-env-invalid.json 2>/tmp/evidence-env-invalid.log; then
   echo "PROFILE EVIDENCE REGRESSION FAIL: unknown exact-identity selector passed" >&2
   exit 1
