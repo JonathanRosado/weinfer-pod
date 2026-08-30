@@ -52,6 +52,12 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: pull immutable image outside runtime bound
+        run: |
+          set -x
+          timeout --signal=TERM --kill-after=10s 900s \
+            docker pull "${IMAGE}@${{ needs.build.outputs.digest }}"
+          echo "SMOKE_IMAGE=${IMAGE}@${{ needs.build.outputs.digest }}" >> "$GITHUB_ENV"
       - name: run entrypoint without a GPU
         run: |
           set -x
@@ -70,7 +76,7 @@ jobs:
             -e HF_HUB_OFFLINE=1 \
             -e WEINFER_GATEWAY_BASE="http://127.0.0.1:1" \
             -e WEINFER_WORKER_KEY="smoke-only" \
-            "${IMAGE}:${{ github.sha }}" \
+            "$SMOKE_IMAGE" \
             > smoke.log 2>&1
           SMOKE_STATUS=$?
           set -e
@@ -98,7 +104,7 @@ jobs:
             -e WEINFER_ENGINE_BASE="http://127.0.0.1:8000" \
             -e WEINFER_WORKER_KEY="smoke-only" \
             -e WEINFER_SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct" \
-            "${IMAGE}:${{ github.sha }}" > worker.log 2>&1
+            "$SMOKE_IMAGE" > worker.log 2>&1
           WORKER_STATUS=$?
           set -e
           cat worker.log
@@ -108,14 +114,14 @@ jobs:
       - name: immutable bytes and profile gate fail closed
         run: |
           set -x
-          docker run --rm --entrypoint python3 "${IMAGE}:${{ github.sha }}" \
+          docker run --rm --entrypoint python3 "$SMOKE_IMAGE" \
             /weinfer/runtime/verify_runtime.py --static > static.json
           grep -q 'weinfer_image_static_verification_v1' static.json
           set +e
-          docker run --rm "${IMAGE}:${{ github.sha }}" > missing-profile.log 2>&1
+          docker run --rm "$SMOKE_IMAGE" > missing-profile.log 2>&1
           MISSING=$?
           docker run --rm -e WEINFER_SERVING_PROFILE=typo \
-            "${IMAGE}:${{ github.sha }}" > unknown-profile.log 2>&1
+            "$SMOKE_IMAGE" > unknown-profile.log 2>&1
           UNKNOWN=$?
           set -e
           [ "$MISSING" != 0 ]
