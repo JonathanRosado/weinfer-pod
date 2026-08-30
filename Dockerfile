@@ -9,8 +9,16 @@ FROM vllm/vllm-openai@sha256:d8d39b59e909d2378ac4feeb191f7e7b6f1342477dc66b7c47c
 
 ARG FLASHINFER_SDIST_URL="https://files.pythonhosted.org/packages/ba/71/dd3001b8be8174d90561764a5f3be4ca219517bde2841189ea6973a3873f/flashinfer_python-0.3.1.tar.gz"
 ARG FLASHINFER_SDIST_SHA256="992017d193dfbbc62e67401a6d5416629bf90b640872d14b7863de45e9371446"
+ARG WEINFER_RUNTIME_CONTRACT_SHA256
 
 COPY runtime /weinfer/runtime
+
+# The digest-bound config label lets the deployer prove, before provider
+# create, that its rendered argv and this image were built from the same
+# contract. Refuse the build if the workflow supplies any adjacent hash.
+RUN printf '%s  %s\n' "${WEINFER_RUNTIME_CONTRACT_SHA256}" \
+        /weinfer/runtime/runtime-contract.json | sha256sum -c -
+LABEL ai.weinfer.runtime-contract-sha256="${WEINFER_RUNTIME_CONTRACT_SHA256}"
 
 # `patch` is used once to land the exact upstream vLLM fix.  FlashInfer
 # is installed from the sha-bound 0.3.1 source distribution because

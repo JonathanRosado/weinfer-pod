@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -34,12 +35,21 @@ def flag_value(tokens: list[str], flag: str) -> str:
 def main() -> int:
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     entrypoint = (ROOT / "entrypoint.sh").read_text(encoding="utf-8")
-    contract = json.loads((RUNTIME / "runtime-contract.json").read_text())
+    contract_path = RUNTIME / "runtime-contract.json"
+    contract = json.loads(contract_path.read_text())
+    contract_sha256 = hashlib.sha256(contract_path.read_bytes()).hexdigest()
     profiles = contract["profiles"]
 
     assert "FROM vllm/vllm-openai@sha256:d8d39b59" in dockerfile
     assert "FROM vllm/vllm-openai:v0.11.0" not in dockerfile
     assert "992017d193dfbbc62e67401a6d5416629bf90b640872d14b7863de45e9371446" in dockerfile
+    assert "ARG WEINFER_RUNTIME_CONTRACT_SHA256" in dockerfile
+    assert "/weinfer/runtime/runtime-contract.json | sha256sum -c -" in dockerfile
+    assert (
+        'LABEL ai.weinfer.runtime-contract-sha256="${WEINFER_RUNTIME_CONTRACT_SHA256}"'
+        in dockerfile
+    )
+    assert len(contract_sha256) == 64
     for executable in (
         "install_flashinfer.py",
         "apply_vllm_h100_backport.sh",
