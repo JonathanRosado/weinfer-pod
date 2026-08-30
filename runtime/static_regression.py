@@ -195,6 +195,8 @@ def main() -> int:
     assert [target["kind"] for target in exact_runner_scope.TARGETS] == [
         "explicit_instantiations",
         "runtime_binding",
+        "candidate_authority",
+        "tactic_dispatch",
     ]
     assert exact_runner_scope.RUNNER_CONTRACT == {
         "activation_dtype": "bfloat16",
@@ -204,6 +206,13 @@ def main() -> int:
         "use_w4_group_scaling": True,
         "weight_storage_dtype": "uint8",
         "weight_template_dtype": "mxfp4_e2m1",
+    }
+    assert exact_runner_scope.TACTIC_CONTRACT == {
+        "candidate_flags": ["weight_only", "hopper", "grouped_gemm"],
+        "cluster_shape": [1, 1, 1],
+        "cta_shape": [128, 128, 128],
+        "epilogue_schedule": "auto_config_to_tma_warp_specialized_cooperative",
+        "mainloop_schedule": "pingpong",
     }
     for target in exact_runner_scope.TARGETS:
         try:
@@ -232,6 +241,40 @@ def main() -> int:
     assert (
         b"WeInfer exact SM90 BF16/MXFP4 runner scope refused"
         in exact_runner_scope.BINDING_PREFIX
+    )
+    assert (
+        b"return {CutlassGemmConfig{CutlassTileConfigSM90::CtaShape128x128x128B"
+        in exact_runner_scope.CANDIDATE_PREFIX
+    )
+    for candidate_flag in (
+        b"CutlassGemmConfig::WEIGHT_ONLY",
+        b"CutlassGemmConfig::HOPPER",
+        b"CutlassGemmConfig::GROUPED_GEMM",
+    ):
+        assert exact_runner_scope.CANDIDATE_PREFIX.count(candidate_flag) == 1
+    assert b"CutlassGemmConfig::FP4_ONLY" not in exact_runner_scope.CANDIDATE_PREFIX
+    assert (
+        b"WeInfer exact SM90 BF16/MXFP4 tactic authority refused candidate flags"
+        in exact_runner_scope.CANDIDATE_PREFIX
+    )
+    assert (
+        exact_runner_scope.DISPATCH_PREFIX.count(
+            b"sm90_generic_mixed_moe_gemm_kernelLauncher<"
+        )
+        == 2
+    )
+    assert (
+        exact_runner_scope.DISPATCH_PREFIX.count(
+            b"Shape<_128, _128, _128>, Shape<_1, _1, _1>,\n"
+            b"      cutlass::gemm::KernelTmaWarpSpecializedPingpong,\n"
+            b"      cutlass::epilogue::TmaWarpSpecializedCooperative,\n"
+            b"      cutlass::WeightOnlyQuantOp::FINEGRAINED_SCALE_ONLY>"
+        )
+        == 2
+    )
+    assert (
+        b"WeInfer exact SM90 BF16/MXFP4 tactic dispatch refused config"
+        in exact_runner_scope.DISPATCH_PREFIX
     )
 
     aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
@@ -265,11 +308,27 @@ def main() -> int:
         aot.TARGET_SOURCE_SUFFIXES
     )
     expected_runner_scope_sources = exact_runner_scope.source_records()
-    patched_source_suffixes = {
+    direct_patched_source_suffixes = {
         record["path"].removeprefix("data/csrc/")
         for record in expected_runner_scope_sources
+        if record["kind"] != "tactic_dispatch"
     }
-    assert patched_source_suffixes.issubset(set(aot.TARGET_STATIC_SOURCE_SUFFIXES))
+    assert direct_patched_source_suffixes.issubset(
+        set(aot.TARGET_STATIC_SOURCE_SUFFIXES)
+    )
+    dispatch_records = [
+        record
+        for record in expected_runner_scope_sources
+        if record["kind"] == "tactic_dispatch"
+    ]
+    assert len(dispatch_records) == 1
+    assert dispatch_records[0]["path"].endswith(
+        "moe_gemm/moe_gemm_template_dispatch_tma_ws_mixed_dtype.h"
+    )
+    assert any(
+        suffix.endswith("moe_gemm_kernels_bf16_fp4.cu")
+        for suffix in aot.TARGET_STATIC_SOURCE_SUFFIXES
+    )
     assert (
         verifier.FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_POLICY
         == exact_runner_scope.POLICY
@@ -283,6 +342,11 @@ def main() -> int:
         verifier.FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT
         == aot.EXACT_MXFP4_RUNNER_CONTRACT
         == exact_runner_scope.RUNNER_CONTRACT
+    )
+    assert (
+        verifier.FLASHINFER_EXACT_MXFP4_TACTIC_CONTRACT
+        == aot.EXACT_MXFP4_TACTIC_CONTRACT
+        == exact_runner_scope.TACTIC_CONTRACT
     )
     assert verifier.VLLM_MXFP4_CALL_SOURCE == aot.VLLM_MXFP4_CALL_SOURCE
     assert (
@@ -304,10 +368,49 @@ def main() -> int:
         == aot.UPSTREAM_SHARED_BINDING_SOURCE
     )
     assert verifier.EXPECTED_RUNTIME_BINDING == aot.RUNTIME_BINDING
+    assert aot.ninja_assignment_tokens(
+        "cflags = $common_cflags $\n"
+        "    -fPIC $\n"
+        "    -DFAST_BUILD $\n"
+        "    -DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE\n"
+        "post_cflags =\n",
+        "cflags",
+    ) == [
+        "$common_cflags",
+        "-fPIC",
+        "-DFAST_BUILD",
+        "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE",
+    ]
 
-    class SyntheticOperation:
+    class SyntheticEnum:
         def __init__(self, name: str):
             self.name = name
+
+    class SyntheticOperation:
+        def __init__(self, name: str, **changes):
+            self.name = name
+            values = {
+                "act_type": SyntheticEnum("bf16"),
+                "arch": 90,
+                "bias_type": SyntheticEnum("bf16"),
+                "cga_shape": (1, 1, 1),
+                "cta_shape": (128, 128, 128),
+                "epi_fusion": None,
+                "epi_schedule": SyntheticEnum("TmaWarpSpecializedCooperative"),
+                "epi_tag": SyntheticEnum("epilogue_op_default"),
+                "gemm_kind": SyntheticEnum("Grouped"),
+                "is_mx_fpx": False,
+                "mainloop_schedule": SyntheticEnum("TmaWarpSpecializedPingpong"),
+                "output_type": SyntheticEnum("bf16"),
+                "quant_op": SyntheticEnum("finegrained_scale_only"),
+                "scalezero_type": SyntheticEnum("ue8m0"),
+                "stages": 0,
+                "warp_shape": (0, 0, 0),
+                "weight_type": SyntheticEnum("e2m1"),
+            }
+            values.update(changes)
+            for key, value in values.items():
+                setattr(self, key, value)
 
         def __repr__(self) -> str:
             return self.name
@@ -315,6 +418,31 @@ def main() -> int:
     target = SyntheticOperation(aot.TARGET_TACTIC)
     wrong = SyntheticOperation(aot.TARGET_TACTIC.replace("bf16", "fp16", 1))
     assert aot.select_target_operation([wrong, target]) is target
+    assert aot.validate_target_operation(target) == {
+        "activation_dtype": "bfloat16",
+        "cluster_shape": [1, 1, 1],
+        "cta_shape": [128, 128, 128],
+        "generated_tactic": aot.TARGET_TACTIC,
+        "mainloop_schedule": "pingpong",
+        "scale_dtype": "ue8m0",
+        "tactic_contract": aot.EXACT_MXFP4_TACTIC_CONTRACT,
+        "weight_dtype": "mxfp4_e2m1",
+    }
+    for field, changed in (
+        ("cta_shape", (64, 64, 128)),
+        ("cga_shape", (1, 2, 1)),
+        ("mainloop_schedule", SyntheticEnum("TmaWarpSpecializedCooperative")),
+        ("epi_schedule", SyntheticEnum("NoSmemWarpSpecialized")),
+        ("quant_op", SyntheticEnum("finegrained_scale_and_zeros")),
+        ("weight_type", SyntheticEnum("e4m3")),
+    ):
+        try:
+            aot.validate_target_operation(
+                SyntheticOperation(aot.TARGET_TACTIC, **{field: changed})
+            )
+            raise AssertionError(f"TARGET_TACTIC {field} drift passed")
+        except RuntimeError as exc:
+            assert "operation-field drift" in str(exc)
     for operations in ([wrong], [target, SyntheticOperation(aot.TARGET_TACTIC)]):
         try:
             aot.select_target_operation(operations)
@@ -327,6 +455,7 @@ def main() -> int:
             self.name = "fused_moe_90"
             self.ninja_path = ninja_path
             self.sources: list[Path] = []
+            self.extra_cflags = ["-DFAST_BUILD"]
             self.extra_cuda_cflags = [
                 "-DCOMPILE_HOPPER_TMA_GEMMS",
                 "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS",
@@ -337,14 +466,16 @@ def main() -> int:
             ]
             self.write_count = 0
             self.written_sources: tuple[Path, ...] = ()
+            self.written_flags: tuple[str, ...] = ()
             self.written_cuda_flags: tuple[str, ...] = ()
 
         def write_ninja(self) -> None:
             self.write_count += 1
             self.written_sources = tuple(self.sources)
+            self.written_flags = tuple(self.extra_cflags)
             self.written_cuda_flags = tuple(self.extra_cuda_cflags)
             lines = [
-                "cflags = -DFAST_BUILD",
+                "cflags = " + " ".join(self.extra_cflags),
                 "cuda_cflags = " + " ".join(self.extra_cuda_cflags),
             ]
             lines.extend(
@@ -361,6 +492,13 @@ def main() -> int:
         assert aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected) is synthetic_spec
         assert synthetic_spec.write_count == 1
         assert synthetic_spec.written_sources == tuple(selected)
+        assert synthetic_spec.written_flags.count("-DFAST_BUILD") == 1
+        assert (
+            synthetic_spec.written_flags.count(
+                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE"
+            )
+            == 1
+        )
         assert synthetic_spec.written_cuda_flags.count("-DENABLE_FP8") == 1
         assert (
             synthetic_spec.written_cuda_flags.count(
@@ -389,8 +527,9 @@ def main() -> int:
             assert "lost compatibility flag -DENABLE_FP8" in str(exc)
         synthetic_spec.ninja_path.write_text(
             good_ninja.replace(
+                "cflags = -DFAST_BUILD "
                 "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE",
-                "",
+                "cflags = -DFAST_BUILD",
                 1,
             ),
             encoding="utf-8",
@@ -401,7 +540,31 @@ def main() -> int:
         except RuntimeError as exc:
             assert (
                 "lost runner-scope flag "
-                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE"
+                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE from host or CUDA"
+                in str(exc)
+            )
+        cuda_line = next(
+            line
+            for line in good_ninja.splitlines()
+            if line.startswith("cuda_cflags = ")
+        )
+        synthetic_spec.ninja_path.write_text(
+            good_ninja.replace(
+                cuda_line,
+                cuda_line.replace(
+                    " -DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE", "", 1
+                ),
+                1,
+            ),
+            encoding="utf-8",
+        )
+        try:
+            aot.verify_emitted_ninja(synthetic_spec, selected)
+            raise AssertionError("missing CUDA exact tactic-scope define passed")
+        except RuntimeError as exc:
+            assert (
+                "lost runner-scope flag "
+                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE from host or CUDA"
                 in str(exc)
             )
         synthetic_spec.ninja_path.write_text(

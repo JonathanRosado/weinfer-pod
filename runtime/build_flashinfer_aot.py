@@ -91,6 +91,38 @@ EXACT_MXFP4_RUNNER_SCOPE_SOURCES = (
             "7661c90f654156ad2ad42134a6e8c4194ccf8664601501187fa984c937553928"
         ),
     },
+    {
+        "kind": "candidate_authority",
+        "path": (
+            "data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+            "cutlass_heuristic.cpp"
+        ),
+        "preimage_sha256": (
+            "1625b594408f4992d34d6e12ec361b56ed41878841e25313c0eb0be9561aa25d"
+        ),
+        "region_sha256": (
+            "47a7e068d60d472cdfd2d4202a02ce99680c41e7c6e98484be72a43259ddea26"
+        ),
+        "source_sha256": (
+            "610b72988afda7217ce30c10502d3dab43de4b312e53e5649654c807b8791f9b"
+        ),
+    },
+    {
+        "kind": "tactic_dispatch",
+        "path": (
+            "data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+            "moe_gemm/moe_gemm_template_dispatch_tma_ws_mixed_dtype.h"
+        ),
+        "preimage_sha256": (
+            "1ffdaed0f314181c3404b81e3538e87e26cb8b15eaf66d695571176b7b2033c8"
+        ),
+        "region_sha256": (
+            "bb8cae4c049566f040098fe73e3669adaf672f7eea760c2aa1dc64ece890e740"
+        ),
+        "source_sha256": (
+            "df2ad905c041c2b28edf265e8538d0d89571cd9a97a4a17a892c10dc5c33168e"
+        ),
+    },
 )
 EXACT_MXFP4_RUNNER_CONTRACT = {
     "activation_dtype": "bfloat16",
@@ -100,6 +132,13 @@ EXACT_MXFP4_RUNNER_CONTRACT = {
     "use_w4_group_scaling": True,
     "weight_storage_dtype": "uint8",
     "weight_template_dtype": "mxfp4_e2m1",
+}
+EXACT_MXFP4_TACTIC_CONTRACT = {
+    "candidate_flags": ["weight_only", "hopper", "grouped_gemm"],
+    "cluster_shape": [1, 1, 1],
+    "cta_shape": [128, 128, 128],
+    "epilogue_schedule": "auto_config_to_tma_warp_specialized_cooperative",
+    "mainloop_schedule": "pingpong",
 }
 REQUIRED_COMPATIBILITY_COMPILE_DEFINES = ("ENABLE_FP8",)
 REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES = (
@@ -128,6 +167,89 @@ def select_target_operation(operations):
             f"expected one exact SM90 BF16/MXFP4 tactic, observed {len(matches)}"
         )
     return matches[0]
+
+
+def enum_member_name(value, field: str) -> str:
+    name = getattr(value, "name", None)
+    if not isinstance(name, str) or not name:
+        raise RuntimeError(f"FlashInfer selected operation lost enum field {field}")
+    return name
+
+
+def validate_target_operation(operation) -> dict[str, object]:
+    """Bind TARGET_TACTIC to the generator fields that form its C++ symbol."""
+    observed = {
+        "activation_type": enum_member_name(operation.act_type, "act_type"),
+        "architecture": operation.arch,
+        "bias_type": enum_member_name(operation.bias_type, "bias_type"),
+        "cluster_shape": list(operation.cga_shape),
+        "cta_shape": list(operation.cta_shape),
+        "epilogue_fusion": (
+            None
+            if operation.epi_fusion is None
+            else enum_member_name(operation.epi_fusion, "epi_fusion")
+        ),
+        "epilogue_schedule": enum_member_name(
+            operation.epi_schedule, "epi_schedule"
+        ),
+        "epilogue_tag": enum_member_name(operation.epi_tag, "epi_tag"),
+        "gemm_kind": enum_member_name(operation.gemm_kind, "gemm_kind"),
+        "is_mx_fpx": operation.is_mx_fpx,
+        "mainloop_schedule": enum_member_name(
+            operation.mainloop_schedule, "mainloop_schedule"
+        ),
+        "output_type": enum_member_name(operation.output_type, "output_type"),
+        "quantization": enum_member_name(operation.quant_op, "quant_op"),
+        "scale_type": enum_member_name(operation.scalezero_type, "scalezero_type"),
+        "stages": operation.stages,
+        "warp_shape": list(operation.warp_shape),
+        "weight_type": enum_member_name(operation.weight_type, "weight_type"),
+    }
+    expected = {
+        "activation_type": "bf16",
+        "architecture": 90,
+        "bias_type": "bf16",
+        "cluster_shape": [1, 1, 1],
+        "cta_shape": [128, 128, 128],
+        "epilogue_fusion": None,
+        "epilogue_schedule": "TmaWarpSpecializedCooperative",
+        "epilogue_tag": "epilogue_op_default",
+        "gemm_kind": "Grouped",
+        "is_mx_fpx": False,
+        "mainloop_schedule": "TmaWarpSpecializedPingpong",
+        "output_type": "bf16",
+        "quantization": "finegrained_scale_only",
+        "scale_type": "ue8m0",
+        "stages": 0,
+        "warp_shape": [0, 0, 0],
+        "weight_type": "e2m1",
+    }
+    if observed != expected:
+        raise RuntimeError(
+            "FlashInfer TARGET_TACTIC operation-field drift: "
+            + json.dumps(observed, sort_keys=True)
+        )
+    tactic_contract = {
+        "candidate_flags": list(EXACT_MXFP4_TACTIC_CONTRACT["candidate_flags"]),
+        "cluster_shape": observed["cluster_shape"],
+        "cta_shape": observed["cta_shape"],
+        "epilogue_schedule": (
+            "auto_config_to_tma_warp_specialized_cooperative"
+        ),
+        "mainloop_schedule": "pingpong",
+    }
+    if tactic_contract != EXACT_MXFP4_TACTIC_CONTRACT:
+        raise RuntimeError("FlashInfer generated operation/tactic contract drift")
+    return {
+        "activation_dtype": "bfloat16",
+        "cluster_shape": observed["cluster_shape"],
+        "cta_shape": observed["cta_shape"],
+        "generated_tactic": repr(operation),
+        "mainloop_schedule": "pingpong",
+        "scale_dtype": "ue8m0",
+        "tactic_contract": tactic_contract,
+        "weight_dtype": "mxfp4_e2m1",
+    }
 
 
 def source_for_suffix(sources: list[Path], suffix: str) -> Path:
@@ -173,10 +295,15 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
         raise RuntimeError("FlashInfer removed compile define survived narrowing")
     for define in REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES:
         flag = f"-D{define}"
-        if flag not in spec.extra_cuda_cflags:
-            spec.extra_cuda_cflags.append(flag)
-        if spec.extra_cuda_cflags.count(flag) != 1:
-            raise RuntimeError(f"FlashInfer runner-scope define drift: {define}")
+        for attribute in ("extra_cflags", "extra_cuda_cflags"):
+            flags = list(getattr(spec, attribute) or [])
+            if flag not in flags:
+                flags.append(flag)
+            if flags.count(flag) != 1:
+                raise RuntimeError(
+                    f"FlashInfer runner-scope define drift: {define} in {attribute}"
+                )
+            setattr(spec, attribute, flags)
     for define in REQUIRED_COMPATIBILITY_COMPILE_DEFINES:
         if spec.extra_cuda_cflags.count(f"-D{define}") != 1:
             raise RuntimeError(
@@ -190,6 +317,27 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
     # 14-source set and flags that the manifest records.
     spec.write_ninja()
     return spec
+
+
+def ninja_assignment_tokens(ninja: str, name: str) -> list[str]:
+    """Read one Ninja variable, including `$`-continued physical lines."""
+    lines = ninja.splitlines()
+    prefix = f"{name} = "
+    matches = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"emitted FlashInfer Ninja {name} authority count drift: {len(matches)}"
+        )
+    index = matches[0]
+    chunks = [lines[index][len(prefix) :].strip()]
+    while chunks[-1].endswith("$"):
+        index += 1
+        if index >= len(lines) or not lines[index].startswith("    "):
+            raise RuntimeError(
+                f"emitted FlashInfer Ninja {name} continuation drift"
+            )
+        chunks.append(lines[index].strip())
+    return [token for token in " ".join(chunks).split() if token != "$"]
 
 
 def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
@@ -211,7 +359,9 @@ def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
             "emitted FlashInfer Ninja graph does not match the narrow source set: "
             f"expected {len(expected)}, observed {len(emitted)}"
         )
-    if ninja.count("-DFAST_BUILD") != 1:
+    cflags = ninja_assignment_tokens(ninja, "cflags")
+    cuda_cflags = ninja_assignment_tokens(ninja, "cuda_cflags")
+    if cflags.count("-DFAST_BUILD") != 1:
         raise RuntimeError("emitted FlashInfer Ninja graph lost FAST_BUILD")
     for define in REMOVED_COMPILE_DEFINES:
         forbidden = f"-D{define}"
@@ -221,15 +371,16 @@ def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
             )
     for define in REQUIRED_COMPATIBILITY_COMPILE_DEFINES:
         required = f"-D{define}"
-        if ninja.count(required) != 1:
+        if cuda_cflags.count(required) != 1:
             raise RuntimeError(
                 f"emitted FlashInfer Ninja graph lost compatibility flag {required}"
             )
     for define in REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES:
         required = f"-D{define}"
-        if ninja.count(required) != 1:
+        if cflags.count(required) != 1 or cuda_cflags.count(required) != 1:
             raise RuntimeError(
-                f"emitted FlashInfer Ninja graph lost runner-scope flag {required}"
+                "emitted FlashInfer Ninja graph lost runner-scope flag "
+                f"{required} from host or CUDA compile authority"
             )
     return {
         "module": spec.name,
@@ -266,6 +417,7 @@ def narrow_fused_moe_spec(spec):
     operation = select_target_operation(
         generate_sm90_mixed_type_grouped_gemm_operations(True)
     )
+    operation_authority = validate_target_operation(operation)
     generated = (
         jit_env.FLASHINFER_CSRC_DIR
         / "nv_internal/tensorrt_llm/cutlass_instantiations/90"
@@ -287,7 +439,7 @@ def narrow_fused_moe_spec(spec):
         json.dumps(verify_emitted_ninja(narrowed, selected), sort_keys=True),
         flush=True,
     )
-    return narrowed
+    return narrowed, operation_authority
 
 
 def validate_fused_moe_aot_load(spec, shared_object: Path) -> str:
@@ -324,8 +476,11 @@ def main() -> int:
     from flashinfer.sampling import gen_sampling_module
     from flashinfer.tllm_utils import gen_trtllm_utils_module
 
+    fused_moe_spec, fused_moe_operation = narrow_fused_moe_spec(
+        gen_cutlass_fused_moe_sm90_module(use_fast_build=True)
+    )
     specs = [
-        narrow_fused_moe_spec(gen_cutlass_fused_moe_sm90_module(use_fast_build=True)),
+        fused_moe_spec,
         gen_sampling_module(),
         gen_trtllm_utils_module(),
     ]
@@ -367,12 +522,12 @@ def main() -> int:
         "cuda_arch": EXPECTED_ARCH,
         "flashinfer_python_version": EXPECTED_VERSION,
         "fused_moe_build": {
-            "activation_dtype": "bfloat16",
-            "cluster_shape": [1, 1, 1],
+            "activation_dtype": fused_moe_operation["activation_dtype"],
+            "cluster_shape": fused_moe_operation["cluster_shape"],
             "compiled_source_count": len(specs[0].sources),
             "compile_define": "FAST_BUILD",
-            "cta_shape": [128, 128, 128],
-            "generated_tactic": TARGET_TACTIC,
+            "cta_shape": fused_moe_operation["cta_shape"],
+            "generated_tactic": fused_moe_operation["generated_tactic"],
             "compatibility_compile_defines": list(
                 REQUIRED_COMPATIBILITY_COMPILE_DEFINES
             ),
@@ -380,24 +535,27 @@ def main() -> int:
             "exact_mxfp4_runner_scope_sources": list(
                 EXACT_MXFP4_RUNNER_SCOPE_SOURCES
             ),
+            "exact_mxfp4_tactic_contract": fused_moe_operation[
+                "tactic_contract"
+            ],
             "image_build_dynamic_load_validation": fused_moe_load_validation,
             "link_satisfaction_source": UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
             "link_satisfaction_source_sha256": (
                 UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
             ),
-            "mainloop_schedule": "pingpong",
+            "mainloop_schedule": fused_moe_operation["mainloop_schedule"],
             "removed_compile_defines": list(REMOVED_COMPILE_DEFINES),
             "runner_scope_compile_defines": list(
                 REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES
             ),
             "runtime_binding": RUNTIME_BINDING,
-            "scale_dtype": "ue8m0",
+            "scale_dtype": fused_moe_operation["scale_dtype"],
             "source_suffixes": list(TARGET_SOURCE_SUFFIXES),
             "upstream_fast_build": True,
             "upstream_shared_binding_source": UPSTREAM_SHARED_BINDING_SOURCE,
             "vllm_mxfp4_call_source": VLLM_MXFP4_CALL_SOURCE,
             "vllm_mxfp4_call_source_sha256": VLLM_MXFP4_CALL_SOURCE_SHA256,
-            "weight_dtype": "mxfp4_e2m1",
+            "weight_dtype": fused_moe_operation["weight_dtype"],
         },
         "object": "weinfer_flashinfer_aot_manifest_v1",
         "operators": rows,

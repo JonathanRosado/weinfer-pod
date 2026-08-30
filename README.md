@@ -18,9 +18,16 @@ behind `#else`, while this image's required scope define admits only the tuple
 the pinned vLLM path sends: BF16 input and output, byte-packed MXFP4 storage,
 and W4 group scaling. That tuple constructs the BF16/FP4 runner supplied by the
 one retained kernel source; a different tuple raises a named refusal when the
-runner is constructed. No FP8 activation tactic or kernel source is compiled,
-and the manifest records the compatibility define, exact scope define, runtime
-tuple, and both reversible transforms.
+runner is constructed. The same reversible transform also binds the SM90
+candidate list and mixed-MoE dispatch to CTA 128x128x128, cluster 1x1x1 and
+ping-pong. This closes an upstream `FAST_BUILD` asymmetry in which candidate
+enumeration and the dispatch switch still referenced clusters and tiles that
+the one-tactic image did not compile; any differing runtime config now raises a
+named refusal. The candidate authority also records upstream's actual WFP4A16
+classification (`WEIGHT_ONLY | HOPPER | GROUPED_GEMM`); `FP4_ONLY` is not set
+for BF16 activations. No FP8 activation tactic or kernel source is compiled, and the
+manifest records the compatibility define, exact scope define, runtime tuple,
+tactic tuple, and all four reversible transforms.
 FlashInfer's misleadingly named `flashinfer_cutlass_fused_moe_sm100_ops.cu` is
 also retained and named in the manifest because upstream uses it as the shared
 PyTorch binding source for both its SM90 and SM100 module generators.

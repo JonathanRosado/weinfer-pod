@@ -40,7 +40,8 @@ FLASHINFER_SOURCE_SHA256 = "dbca0c0c36d4fd2f559021b5d9c356681501b14a3cf2ec3d37d5
 FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_POLICY = (
     "retain ENABLE_FP8 for vendored shared PackType definitions while compiling "
     "only the exact SM90 BF16-activation/MXFP4-weight runner requested by the "
-    "pinned vLLM launch path"
+    "pinned vLLM launch path, and bind its candidate and dispatch authorities "
+    "to the one generated FAST_BUILD tactic"
 )
 FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT = {
     "activation_dtype": "bfloat16",
@@ -50,6 +51,13 @@ FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT = {
     "use_w4_group_scaling": True,
     "weight_storage_dtype": "uint8",
     "weight_template_dtype": "mxfp4_e2m1",
+}
+FLASHINFER_EXACT_MXFP4_TACTIC_CONTRACT = {
+    "candidate_flags": ["weight_only", "hopper", "grouped_gemm"],
+    "cluster_shape": [1, 1, 1],
+    "cta_shape": [128, 128, 128],
+    "epilogue_schedule": "auto_config_to_tma_warp_specialized_cooperative",
+    "mainloop_schedule": "pingpong",
 }
 FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES = [
     {
@@ -82,6 +90,38 @@ FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES = [
         ),
         "source_sha256": (
             "7661c90f654156ad2ad42134a6e8c4194ccf8664601501187fa984c937553928"
+        ),
+    },
+    {
+        "kind": "candidate_authority",
+        "path": (
+            "data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+            "cutlass_heuristic.cpp"
+        ),
+        "preimage_sha256": (
+            "1625b594408f4992d34d6e12ec361b56ed41878841e25313c0eb0be9561aa25d"
+        ),
+        "region_sha256": (
+            "47a7e068d60d472cdfd2d4202a02ce99680c41e7c6e98484be72a43259ddea26"
+        ),
+        "source_sha256": (
+            "610b72988afda7217ce30c10502d3dab43de4b312e53e5649654c807b8791f9b"
+        ),
+    },
+    {
+        "kind": "tactic_dispatch",
+        "path": (
+            "data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+            "moe_gemm/moe_gemm_template_dispatch_tma_ws_mixed_dtype.h"
+        ),
+        "preimage_sha256": (
+            "1ffdaed0f314181c3404b81e3538e87e26cb8b15eaf66d695571176b7b2033c8"
+        ),
+        "region_sha256": (
+            "bb8cae4c049566f040098fe73e3669adaf672f7eea760c2aa1dc64ece890e740"
+        ),
+        "source_sha256": (
+            "df2ad905c041c2b28edf265e8538d0d89571cd9a97a4a17a892c10dc5c33168e"
         ),
     },
 ]
@@ -305,7 +345,7 @@ def verify_static() -> dict[str, Any]:
     exact_runner_scope_marker = read_json(exact_runner_scope_marker_path)
     require_keys(
         exact_runner_scope_marker,
-        {"object", "policy", "runner", "sources"},
+        {"object", "policy", "runner", "sources", "tactic"},
         "FlashInfer exact MXFP4 runner-scope marker",
     )
     if (
@@ -315,6 +355,8 @@ def verify_static() -> dict[str, Any]:
         != FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_POLICY
         or exact_runner_scope_marker["runner"]
         != FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT
+        or exact_runner_scope_marker["tactic"]
+        != FLASHINFER_EXACT_MXFP4_TACTIC_CONTRACT
         or exact_runner_scope_marker["sources"]
         != FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES
     ):
@@ -364,6 +406,9 @@ def verify_static() -> dict[str, Any]:
         ),
         "exact_mxfp4_runner_scope_sources": (
             FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES
+        ),
+        "exact_mxfp4_tactic_contract": (
+            FLASHINFER_EXACT_MXFP4_TACTIC_CONTRACT
         ),
         "generated_tactic": EXPECTED_FUSED_MOE_TACTIC,
         "image_build_dynamic_load_validation": "torch.classes.FusedMoeRunner",
