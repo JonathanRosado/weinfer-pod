@@ -53,6 +53,7 @@ def main() -> int:
     for executable in (
         "install_flashinfer.py",
         "apply_vllm_h100_backport.sh",
+        "apply_flashinfer_fp4_header_fix.py",
         "apply_flashinfer_no_jit.py",
         "build_flashinfer_aot.py",
         "verify_runtime.py --static",
@@ -184,6 +185,22 @@ def main() -> int:
         synthetic = synthetic.replace(old, new)
     assert synthetic.count(b"FLASHINFER_DISABLE_JIT") == 3
 
+    fp4_header_fix = load_module(
+        "apply_flashinfer_fp4_header_fix",
+        RUNTIME / "apply_flashinfer_fp4_header_fix.py",
+    )
+    synthetic_header = b"prefix\n" + fp4_header_fix.OLD_DECLARATION + b"suffix\n"
+    fixed_header = synthetic_header.replace(
+        fp4_header_fix.OLD_DECLARATION,
+        fp4_header_fix.NEW_DECLARATION,
+    )
+    assert fixed_header.count(b"use_wfp4afp4 = false;") == 0
+    try:
+        fp4_header_fix.transform(synthetic_header)
+        raise AssertionError("non-pinned FP4 header preimage passed")
+    except RuntimeError as exc:
+        assert "postimage mismatch" in str(exc)
+
     aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
     assert len(aot.TARGET_SOURCE_SUFFIXES) == 14
     assert aot.TARGET_SOURCE_SUFFIXES[-1] == (
@@ -214,8 +231,14 @@ def main() -> int:
     assert verifier.EXPECTED_FUSED_MOE_SOURCE_SUFFIXES == list(
         aot.TARGET_SOURCE_SUFFIXES
     )
-    assert verifier.EXPECTED_HEADER_COMPATIBILITY_DEFINES == list(
-        aot.HEADER_COMPATIBILITY_DEFINES
+    assert (
+        verifier.FLASHINFER_FP4_HEADER_SOURCE_SHA256
+        == aot.FP4_HEADER_SOURCE_SHA256
+        == fp4_header_fix.POSTIMAGE_SHA256
+        == "5e49703e055c8167b32a09a6b6b0ff09d499bf72e5e70e4a4bdd56304f21ca39"
+    )
+    assert verifier.EXPECTED_REMOVED_COMPILE_DEFINES == list(
+        aot.REMOVED_COMPILE_DEFINES
     )
     assert (
         verifier.EXPECTED_UPSTREAM_SHARED_BINDING_SOURCE
@@ -279,7 +302,7 @@ def main() -> int:
         assert aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected) is synthetic_spec
         assert synthetic_spec.write_count == 1
         assert synthetic_spec.written_sources == tuple(selected)
-        assert synthetic_spec.written_cuda_flags.count("-DENABLE_FP8") == 1
+        assert "-DENABLE_FP8" not in synthetic_spec.written_cuda_flags
         assert "-DCOMPILE_HOPPER_TMA_GEMMS" not in synthetic_spec.written_cuda_flags
         assert "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS" in synthetic_spec.written_cuda_flags
         graph = aot.verify_emitted_ninja(synthetic_spec, selected)
@@ -287,14 +310,18 @@ def main() -> int:
         assert len(graph["ninja_sha256"]) == 64
         good_ninja = synthetic_spec.ninja_path.read_text()
         synthetic_spec.ninja_path.write_text(
-            good_ninja.replace("-DENABLE_FP8", ""),
+            good_ninja.replace(
+                "cuda_cflags = ",
+                "cuda_cflags = -DENABLE_FP8 ",
+                1,
+            ),
             encoding="utf-8",
         )
         try:
             aot.verify_emitted_ninja(synthetic_spec, selected)
-            raise AssertionError("missing FP4 header compatibility define passed")
+            raise AssertionError("removed ENABLE_FP8 compile branch passed")
         except RuntimeError as exc:
-            assert "lost ENABLE_FP8 header compatibility define" in str(exc)
+            assert "retained forbidden flag -DENABLE_FP8" in str(exc)
         synthetic_spec.ninja_path.write_text(
             good_ninja + "build $name/stale.o: cuda_compile /flashinfer/stale.cu\n",
             encoding="utf-8",

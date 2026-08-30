@@ -51,7 +51,10 @@ TARGET_STATIC_SOURCE_SUFFIXES = (
     "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
 )
 TARGET_SOURCE_SUFFIXES = TARGET_STATIC_SOURCE_SUFFIXES + (TARGET_GENERATED_SOURCE,)
-HEADER_COMPATIBILITY_DEFINES = ("ENABLE_FP8",)
+FP4_HEADER_SOURCE_SHA256 = (
+    "5e49703e055c8167b32a09a6b6b0ff09d499bf72e5e70e4a4bdd56304f21ca39"
+)
+REMOVED_COMPILE_DEFINES = ("COMPILE_HOPPER_TMA_GEMMS", "ENABLE_FP8")
 RUNTIME_BINDING = (
     "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
     "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
@@ -98,25 +101,29 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
 
     # The frozen call path is BF16 activation x MXFP4 weight.  Ungrouped GEMM,
     # FP8 activation source files, FP16 and INT4 variants are outside that
-    # contract.  Keep ENABLE_FP8: the vendored moe_gemm_kernels.h declares its
-    # FP4 predicate twice when ENABLE_FP4 is set without this upstream companion
-    # guard.  That define makes the shared runner reference the upstream
-    # fp8_blockscale interface even though this launch never dispatches it, so
-    # retain upstream's no-op link stub as well.  The exact generated tactic and
-    # source list still contain no FP8 activation kernel.
+    # contract.  The image first applies an exact-hash header fix for the
+    # duplicate FP4 predicate that previously forced ENABLE_FP8 into this build;
+    # remove that define so the shared runner cannot retain unused FP8 branches.
+    # Keep upstream's exact no-op fp8_blockscale link stub because the shared
+    # binding still declares that runtime-selectable interface.  The exact
+    # generated tactic and source list contain no FP8 activation kernel.
     spec.extra_cuda_cflags = [
         flag
         for flag in (spec.extra_cuda_cflags or [])
-        if flag != "-DCOMPILE_HOPPER_TMA_GEMMS"
+        if flag
+        not in {f"-D{define}" for define in REMOVED_COMPILE_DEFINES}
     ]
-    if spec.extra_cuda_cflags.count("-DENABLE_FP8") != 1:
-        raise RuntimeError("FlashInfer FP4 header compatibility define drift")
+    if any(
+        f"-D{define}" in spec.extra_cuda_cflags
+        for define in REMOVED_COMPILE_DEFINES
+    ):
+        raise RuntimeError("FlashInfer removed compile define survived narrowing")
     spec.sources = selected
 
     # FlashInfer's gen_jit_spec eagerly writes build.ninja before returning the
     # JitSpec.  Mutating only the Python object leaves that original full graph
     # authoritative.  Re-emit after every mutation so Ninja receives the same
-    # 13-source set and flags that the manifest records.
+    # 14-source set and flags that the manifest records.
     spec.write_ninja()
     return spec
 
@@ -142,11 +149,8 @@ def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
         )
     if ninja.count("-DFAST_BUILD") != 1:
         raise RuntimeError("emitted FlashInfer Ninja graph lost FAST_BUILD")
-    if ninja.count("-DENABLE_FP8") != 1:
-        raise RuntimeError(
-            "emitted FlashInfer Ninja graph lost ENABLE_FP8 header compatibility define"
-        )
-    for forbidden in ("-DCOMPILE_HOPPER_TMA_GEMMS",):
+    for define in REMOVED_COMPILE_DEFINES:
+        forbidden = f"-D{define}"
         if forbidden in ninja:
             raise RuntimeError(
                 f"emitted FlashInfer Ninja graph retained forbidden flag {forbidden}"
@@ -175,7 +179,6 @@ def narrow_fused_moe_spec(spec):
     required_cuda_flags = {
         "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS",
         "-DENABLE_BF16",
-        "-DENABLE_FP8",
         "-DENABLE_FP4",
         "-DUSING_OSS_CUTLASS_MOE_GEMM",
     }
@@ -284,13 +287,14 @@ def main() -> int:
             "compile_define": "FAST_BUILD",
             "cta_shape": [128, 128, 128],
             "generated_tactic": TARGET_TACTIC,
-            "header_compatibility_defines": list(HEADER_COMPATIBILITY_DEFINES),
+            "fp4_header_source_sha256": FP4_HEADER_SOURCE_SHA256,
             "image_build_dynamic_load_validation": fused_moe_load_validation,
             "link_satisfaction_source": UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
             "link_satisfaction_source_sha256": (
                 UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
             ),
             "mainloop_schedule": "pingpong",
+            "removed_compile_defines": list(REMOVED_COMPILE_DEFINES),
             "runtime_binding": RUNTIME_BINDING,
             "scale_dtype": "ue8m0",
             "source_suffixes": list(TARGET_SOURCE_SUFFIXES),

@@ -31,6 +31,9 @@ VLLM_PATCH_SHA256 = "69e6909b439a45baf68ea9fe02f5ca208aea5aa62e1eaf4e559f26a5537
 VLLM_SOURCE_SHA256 = "a8a13a30446f621a190674663e46c00a1e49175ce5591c1b05aaa79bab888567"
 FLASHINFER_VERSION = "0.3.1"
 FLASHINFER_SOURCE_SHA256 = "dbca0c0c36d4fd2f559021b5d9c356681501b14a3cf2ec3d37d53d17527dcc7b"
+FLASHINFER_FP4_HEADER_SOURCE_SHA256 = (
+    "5e49703e055c8167b32a09a6b6b0ff09d499bf72e5e70e4a4bdd56304f21ca39"
+)
 H100_CANONICAL_ARGS = (
     "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 8 "
     "--gpu-memory-utilization 0.95 --enable-chunked-prefill "
@@ -88,7 +91,7 @@ EXPECTED_FUSED_MOE_SOURCE_SUFFIXES = [
     "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
     "weinfer_exact_sm90_bf16_mxfp4.generated.cu",
 ]
-EXPECTED_HEADER_COMPATIBILITY_DEFINES = ["ENABLE_FP8"]
+EXPECTED_REMOVED_COMPILE_DEFINES = ["COMPILE_HOPPER_TMA_GEMMS", "ENABLE_FP8"]
 EXPECTED_RUNTIME_BINDING = (
     "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
     "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
@@ -232,6 +235,27 @@ def verify_static() -> dict[str, Any]:
     ):
         raise RuntimeError("FlashInfer no-JIT source/marker drift")
 
+    fp4_header = (
+        flashinfer_root
+        / "data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+        "include/moe_gemm_kernels.h"
+    )
+    fp4_marker_path = fp4_header.parent / ".weinfer-fp4-header-fix.json"
+    if not fp4_header.is_file() or fp4_header.is_symlink():
+        raise RuntimeError("FlashInfer MoE GEMM header missing or symlinked")
+    fp4_marker = read_json(fp4_marker_path)
+    require_keys(
+        fp4_marker,
+        {"object", "policy", "preimage_sha256", "source_sha256"},
+        "FlashInfer FP4 header-fix marker",
+    )
+    if (
+        fp4_marker["object"] != "weinfer_flashinfer_fp4_header_fix_v1"
+        or fp4_marker["source_sha256"] != FLASHINFER_FP4_HEADER_SOURCE_SHA256
+        or sha256(fp4_header) != FLASHINFER_FP4_HEADER_SOURCE_SHA256
+    ):
+        raise RuntimeError("FlashInfer FP4 header source/marker drift")
+
     manifest = read_json(AOT_MANIFEST_PATH)
     require_keys(
         manifest,
@@ -259,14 +283,15 @@ def verify_static() -> dict[str, Any]:
         "compiled_source_count": len(EXPECTED_FUSED_MOE_SOURCE_SUFFIXES),
         "compile_define": "FAST_BUILD",
         "cta_shape": [128, 128, 128],
+        "fp4_header_source_sha256": FLASHINFER_FP4_HEADER_SOURCE_SHA256,
         "generated_tactic": EXPECTED_FUSED_MOE_TACTIC,
-        "header_compatibility_defines": EXPECTED_HEADER_COMPATIBILITY_DEFINES,
         "image_build_dynamic_load_validation": "torch.classes.FusedMoeRunner",
         "link_satisfaction_source": EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
         "link_satisfaction_source_sha256": (
             EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
         ),
         "mainloop_schedule": "pingpong",
+        "removed_compile_defines": EXPECTED_REMOVED_COMPILE_DEFINES,
         "runtime_binding": EXPECTED_RUNTIME_BINDING,
         "scale_dtype": "ue8m0",
         "source_suffixes": EXPECTED_FUSED_MOE_SOURCE_SUFFIXES,
@@ -312,6 +337,7 @@ def verify_static() -> dict[str, Any]:
 
     return {
         "aot_manifest_sha256": sha256(AOT_MANIFEST_PATH),
+        "flashinfer_fp4_header_source_sha256": FLASHINFER_FP4_HEADER_SOURCE_SHA256,
         "flashinfer_no_jit_source_sha256": FLASHINFER_SOURCE_SHA256,
         "profiles": sorted(contract["profiles"]),
         "vllm_backport_source_sha256": VLLM_SOURCE_SHA256,
