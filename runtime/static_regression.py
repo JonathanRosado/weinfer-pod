@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import shlex
+import tempfile
 from pathlib import Path
 
 
@@ -206,6 +207,64 @@ def main() -> int:
             raise AssertionError("non-unique AOT tactic selection passed")
         except RuntimeError as exc:
             assert "expected one exact SM90 BF16/MXFP4 tactic" in str(exc)
+
+    class SyntheticSpec:
+        def __init__(self, ninja_path: Path) -> None:
+            self.name = "fused_moe_90"
+            self.ninja_path = ninja_path
+            self.sources: list[Path] = []
+            self.extra_cuda_cflags = [
+                "-DCOMPILE_HOPPER_TMA_GEMMS",
+                "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS",
+                "-DENABLE_BF16",
+                "-DENABLE_FP8",
+                "-DENABLE_FP4",
+                "-DUSING_OSS_CUTLASS_MOE_GEMM",
+            ]
+            self.write_count = 0
+            self.written_sources: tuple[Path, ...] = ()
+            self.written_cuda_flags: tuple[str, ...] = ()
+
+        def write_ninja(self) -> None:
+            self.write_count += 1
+            self.written_sources = tuple(self.sources)
+            self.written_cuda_flags = tuple(self.extra_cuda_cflags)
+            lines = ["cflags = -DFAST_BUILD"]
+            lines.extend(
+                f"build $name/{source.stem}.o: "
+                f"{'cuda_compile' if source.suffix == '.cu' else 'compile'} "
+                f"{source.resolve()}"
+                for source in self.sources
+            )
+            self.ninja_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    selected = [Path("/flashinfer") / suffix for suffix in aot.TARGET_SOURCE_SUFFIXES]
+    with tempfile.TemporaryDirectory() as temporary:
+        synthetic_spec = SyntheticSpec(Path(temporary) / "build.ninja")
+        assert aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected) is synthetic_spec
+        assert synthetic_spec.write_count == 1
+        assert synthetic_spec.written_sources == tuple(selected)
+        assert "-DENABLE_FP8" not in synthetic_spec.written_cuda_flags
+        assert "-DCOMPILE_HOPPER_TMA_GEMMS" not in synthetic_spec.written_cuda_flags
+        assert "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS" in synthetic_spec.written_cuda_flags
+        graph = aot.verify_emitted_ninja(synthetic_spec, selected)
+        assert graph["source_count"] == 13
+        assert len(graph["ninja_sha256"]) == 64
+        synthetic_spec.ninja_path.write_text(
+            synthetic_spec.ninja_path.read_text()
+            + "build $name/stale.o: cuda_compile /flashinfer/stale.cu\n",
+            encoding="utf-8",
+        )
+        try:
+            aot.verify_emitted_ninja(synthetic_spec, selected)
+            raise AssertionError("stale full Ninja graph passed")
+        except RuntimeError as exc:
+            assert "expected 13, observed 14" in str(exc)
+        try:
+            aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected[:-1])
+            raise AssertionError("incomplete narrow source set passed")
+        except RuntimeError as exc:
+            assert "narrow FlashInfer AOT source set drift" in str(exc)
 
     waiter = load_module("wait_for_engine", RUNTIME / "wait_for_engine.py")
     assert waiter.pid_alive(os.getpid()) is True

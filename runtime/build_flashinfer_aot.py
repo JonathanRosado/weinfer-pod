@@ -73,6 +73,70 @@ def source_for_suffix(sources: list[Path], suffix: str) -> Path:
     return matches[0]
 
 
+def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
+    """Replace the eager upstream Ninja graph with the frozen source set."""
+    observed_suffixes = tuple(
+        suffix
+        for source in selected
+        for suffix in TARGET_SOURCE_SUFFIXES
+        if source.as_posix().endswith(suffix)
+    )
+    if observed_suffixes != TARGET_SOURCE_SUFFIXES:
+        raise RuntimeError("narrow FlashInfer AOT source set drift")
+
+    # The frozen call path is BF16 activation x MXFP4 weight.  FP8 activation,
+    # ungrouped GEMM, FP16 and INT4 variants are outside that contract.
+    spec.extra_cuda_cflags = [
+        flag
+        for flag in (spec.extra_cuda_cflags or [])
+        if flag not in {"-DENABLE_FP8", "-DCOMPILE_HOPPER_TMA_GEMMS"}
+    ]
+    if "-DENABLE_FP8" in spec.extra_cuda_cflags:
+        raise RuntimeError("FP8 activation re-entered the narrow AOT build")
+    spec.sources = selected
+
+    # FlashInfer's gen_jit_spec eagerly writes build.ninja before returning the
+    # JitSpec.  Mutating only the Python object leaves that original full graph
+    # authoritative.  Re-emit after every mutation so Ninja receives the same
+    # 13-source set and flags that the manifest records.
+    spec.write_ninja()
+    return spec
+
+
+def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
+    """Prove the on-disk graph, not the already-correct Python object."""
+    ninja = spec.ninja_path.read_text(encoding="utf-8")
+    emitted = []
+    for line in ninja.splitlines():
+        if not line.startswith("build "):
+            continue
+        rule_and_input = line.split(": ", 1)
+        if len(rule_and_input) != 2:
+            continue
+        rule, source = rule_and_input[1].split(" ", 1)
+        if rule in {"compile", "cuda_compile"}:
+            emitted.append(source)
+    expected = [str(source.resolve()) for source in selected]
+    if emitted != expected:
+        raise RuntimeError(
+            "emitted FlashInfer Ninja graph does not match the narrow source set: "
+            f"expected {len(expected)}, observed {len(emitted)}"
+        )
+    if ninja.count("-DFAST_BUILD") != 1:
+        raise RuntimeError("emitted FlashInfer Ninja graph lost FAST_BUILD")
+    for forbidden in ("-DENABLE_FP8", "-DCOMPILE_HOPPER_TMA_GEMMS"):
+        if forbidden in ninja:
+            raise RuntimeError(
+                f"emitted FlashInfer Ninja graph retained forbidden flag {forbidden}"
+            )
+    return {
+        "module": spec.name,
+        "ninja_sha256": sha256(spec.ninja_path),
+        "object": "weinfer_flashinfer_prebuild_graph_v1",
+        "source_count": len(emitted),
+    }
+
+
 def narrow_fused_moe_spec(spec):
     """Bind the AOT module to FlashInfer's single upstream fast-build tactic."""
     from flashinfer.jit import env as jit_env
@@ -110,26 +174,12 @@ def narrow_fused_moe_spec(spec):
         source_for_suffix(spec.sources, suffix)
         for suffix in TARGET_STATIC_SOURCE_SUFFIXES
     ] + [generated]
-    observed_suffixes = tuple(
-        suffix
-        for source in selected
-        for suffix in TARGET_SOURCE_SUFFIXES
-        if source.as_posix().endswith(suffix)
+    narrowed = reemit_narrow_fused_moe_spec(spec, selected)
+    print(
+        json.dumps(verify_emitted_ninja(narrowed, selected), sort_keys=True),
+        flush=True,
     )
-    if observed_suffixes != TARGET_SOURCE_SUFFIXES:
-        raise RuntimeError("narrow FlashInfer AOT source set drift")
-
-    # The frozen call path is BF16 activation x MXFP4 weight.  FP8 activation,
-    # ungrouped GEMM, FP16 and INT4 variants are outside that contract.
-    spec.extra_cuda_cflags = [
-        flag
-        for flag in (spec.extra_cuda_cflags or [])
-        if flag not in {"-DENABLE_FP8", "-DCOMPILE_HOPPER_TMA_GEMMS"}
-    ]
-    if "-DENABLE_FP8" in spec.extra_cuda_cflags:
-        raise RuntimeError("FP8 activation re-entered the narrow AOT build")
-    spec.sources = selected
-    return spec
+    return narrowed
 
 
 def main() -> int:
