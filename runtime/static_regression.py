@@ -53,7 +53,7 @@ def main() -> int:
     for executable in (
         "install_flashinfer.py",
         "apply_vllm_h100_backport.sh",
-        "apply_flashinfer_fp4_header_fix.py",
+        "apply_flashinfer_fp8_runner_scope.py",
         "apply_flashinfer_no_jit.py",
         "build_flashinfer_aot.py",
         "verify_runtime.py --static",
@@ -185,21 +185,28 @@ def main() -> int:
         synthetic = synthetic.replace(old, new)
     assert synthetic.count(b"FLASHINFER_DISABLE_JIT") == 3
 
-    fp4_header_fix = load_module(
-        "apply_flashinfer_fp4_header_fix",
-        RUNTIME / "apply_flashinfer_fp4_header_fix.py",
+    fp8_runner_scope = load_module(
+        "apply_flashinfer_fp8_runner_scope",
+        RUNTIME / "apply_flashinfer_fp8_runner_scope.py",
     )
-    synthetic_header = b"prefix\n" + fp4_header_fix.OLD_DECLARATION + b"suffix\n"
-    fixed_header = synthetic_header.replace(
-        fp4_header_fix.OLD_DECLARATION,
-        fp4_header_fix.NEW_DECLARATION,
-    )
-    assert fixed_header.count(b"use_wfp4afp4 = false;") == 0
-    try:
-        fp4_header_fix.transform(synthetic_header)
-        raise AssertionError("non-pinned FP4 header preimage passed")
-    except RuntimeError as exc:
-        assert "postimage mismatch" in str(exc)
+    assert [target["guard_count"] for target in fp8_runner_scope.TARGETS] == [1, 4]
+    for target in fp8_runner_scope.TARGETS:
+        synthetic_source = (
+            b"prefix\n"
+            + fp8_runner_scope.OLD_GUARD * target["guard_count"]
+            + b"suffix\n"
+        )
+        fixed_source = synthetic_source.replace(
+            fp8_runner_scope.OLD_GUARD,
+            fp8_runner_scope.NEW_GUARD,
+        )
+        assert fixed_source.count(fp8_runner_scope.OLD_GUARD) == 0
+        assert fixed_source.count(fp8_runner_scope.NEW_GUARD) == target["guard_count"]
+        try:
+            fp8_runner_scope.transform(synthetic_source, target)
+            raise AssertionError("non-pinned FP8 runner source preimage passed")
+        except RuntimeError as exc:
+            assert "preimage drift" in str(exc)
 
     aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
     assert len(aot.TARGET_SOURCE_SUFFIXES) == 14
@@ -231,11 +238,33 @@ def main() -> int:
     assert verifier.EXPECTED_FUSED_MOE_SOURCE_SUFFIXES == list(
         aot.TARGET_SOURCE_SUFFIXES
     )
+    expected_runner_scope_sources = [
+        {
+            "path": target["path"],
+            "preimage_sha256": target["preimage_sha256"],
+            "source_sha256": target["source_sha256"],
+        }
+        for target in fp8_runner_scope.TARGETS
+    ]
+    patched_source_suffixes = {
+        record["path"].removeprefix("data/csrc/")
+        for record in expected_runner_scope_sources
+    }
+    assert patched_source_suffixes.issubset(set(aot.TARGET_STATIC_SOURCE_SUFFIXES))
     assert (
-        verifier.FLASHINFER_FP4_HEADER_SOURCE_SHA256
-        == aot.FP4_HEADER_SOURCE_SHA256
-        == fp4_header_fix.POSTIMAGE_SHA256
-        == "5e49703e055c8167b32a09a6b6b0ff09d499bf72e5e70e4a4bdd56304f21ca39"
+        verifier.FLASHINFER_FP8_RUNNER_SCOPE_POLICY
+        == fp8_runner_scope.POLICY
+    )
+    assert (
+        verifier.FLASHINFER_FP8_RUNNER_SCOPE_SOURCES
+        == list(aot.FP8_RUNNER_SCOPE_SOURCES)
+        == expected_runner_scope_sources
+    )
+    assert verifier.EXPECTED_COMPATIBILITY_COMPILE_DEFINES == list(
+        aot.REQUIRED_COMPATIBILITY_COMPILE_DEFINES
+    )
+    assert verifier.EXPECTED_RUNNER_SCOPE_COMPILE_DEFINES == list(
+        aot.REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES
     )
     assert verifier.EXPECTED_REMOVED_COMPILE_DEFINES == list(
         aot.REMOVED_COMPILE_DEFINES
@@ -302,7 +331,13 @@ def main() -> int:
         assert aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected) is synthetic_spec
         assert synthetic_spec.write_count == 1
         assert synthetic_spec.written_sources == tuple(selected)
-        assert "-DENABLE_FP8" not in synthetic_spec.written_cuda_flags
+        assert synthetic_spec.written_cuda_flags.count("-DENABLE_FP8") == 1
+        assert (
+            synthetic_spec.written_cuda_flags.count(
+                "-DWEINFER_DISABLE_FP8_RUNNER_BRANCHES"
+            )
+            == 1
+        )
         assert "-DCOMPILE_HOPPER_TMA_GEMMS" not in synthetic_spec.written_cuda_flags
         assert "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS" in synthetic_spec.written_cuda_flags
         graph = aot.verify_emitted_ninja(synthetic_spec, selected)
@@ -311,17 +346,46 @@ def main() -> int:
         good_ninja = synthetic_spec.ninja_path.read_text()
         synthetic_spec.ninja_path.write_text(
             good_ninja.replace(
-                "cuda_cflags = ",
-                "cuda_cflags = -DENABLE_FP8 ",
+                "-DENABLE_FP8 ",
+                "",
                 1,
             ),
             encoding="utf-8",
         )
         try:
             aot.verify_emitted_ninja(synthetic_spec, selected)
-            raise AssertionError("removed ENABLE_FP8 compile branch passed")
+            raise AssertionError("missing ENABLE_FP8 compatibility define passed")
         except RuntimeError as exc:
-            assert "retained forbidden flag -DENABLE_FP8" in str(exc)
+            assert "lost compatibility flag -DENABLE_FP8" in str(exc)
+        synthetic_spec.ninja_path.write_text(
+            good_ninja.replace(
+                "-DWEINFER_DISABLE_FP8_RUNNER_BRANCHES",
+                "",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        try:
+            aot.verify_emitted_ninja(synthetic_spec, selected)
+            raise AssertionError("missing FP8 runner-scope define passed")
+        except RuntimeError as exc:
+            assert (
+                "lost runner-scope flag -DWEINFER_DISABLE_FP8_RUNNER_BRANCHES"
+                in str(exc)
+            )
+        synthetic_spec.ninja_path.write_text(
+            good_ninja.replace(
+                "cuda_cflags = ",
+                "cuda_cflags = -DCOMPILE_HOPPER_TMA_GEMMS ",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        try:
+            aot.verify_emitted_ninja(synthetic_spec, selected)
+            raise AssertionError("removed ungrouped Hopper GEMM branch passed")
+        except RuntimeError as exc:
+            assert "retained forbidden flag -DCOMPILE_HOPPER_TMA_GEMMS" in str(exc)
         synthetic_spec.ninja_path.write_text(
             good_ninja + "build $name/stale.o: cuda_compile /flashinfer/stale.cu\n",
             encoding="utf-8",

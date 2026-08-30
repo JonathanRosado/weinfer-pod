@@ -31,9 +31,37 @@ VLLM_PATCH_SHA256 = "69e6909b439a45baf68ea9fe02f5ca208aea5aa62e1eaf4e559f26a5537
 VLLM_SOURCE_SHA256 = "a8a13a30446f621a190674663e46c00a1e49175ce5591c1b05aaa79bab888567"
 FLASHINFER_VERSION = "0.3.1"
 FLASHINFER_SOURCE_SHA256 = "dbca0c0c36d4fd2f559021b5d9c356681501b14a3cf2ec3d37d53d17527dcc7b"
-FLASHINFER_FP4_HEADER_SOURCE_SHA256 = (
-    "5e49703e055c8167b32a09a6b6b0ff09d499bf72e5e70e4a4bdd56304f21ca39"
+FLASHINFER_FP8_RUNNER_SCOPE_POLICY = (
+    "retain ENABLE_FP8 for vendored shared PackType definitions while compiling "
+    "the binding and explicit-instantiation sources with unused FP8 runner "
+    "branches disabled"
 )
+FLASHINFER_FP8_RUNNER_SCOPE_SOURCES = [
+    {
+        "path": (
+            "data/csrc/fused_moe/cutlass_backend/"
+            "cutlass_fused_moe_instantiation.cu"
+        ),
+        "preimage_sha256": (
+            "56c5cdb2e92fe48cbe8952e17e91d46ce61a82a45dca27f82fa13a43bacced1f"
+        ),
+        "source_sha256": (
+            "b24efa82fab95a873cb1e563cb1e140ed9bd2e0eabefb52ae895b6618b59b311"
+        ),
+    },
+    {
+        "path": (
+            "data/csrc/fused_moe/cutlass_backend/"
+            "flashinfer_cutlass_fused_moe_sm100_ops.cu"
+        ),
+        "preimage_sha256": (
+            "87bf2788f40f752bff7172c13758e6f99d48cb0b73eea11a9fc301203fe90655"
+        ),
+        "source_sha256": (
+            "81866ae743a6ca1c19cd7e1e55894163ddfe133c290a77f5c1f25249e41dc4b5"
+        ),
+    },
+]
 H100_CANONICAL_ARGS = (
     "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 8 "
     "--gpu-memory-utilization 0.95 --enable-chunked-prefill "
@@ -91,7 +119,11 @@ EXPECTED_FUSED_MOE_SOURCE_SUFFIXES = [
     "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
     "weinfer_exact_sm90_bf16_mxfp4.generated.cu",
 ]
-EXPECTED_REMOVED_COMPILE_DEFINES = ["COMPILE_HOPPER_TMA_GEMMS", "ENABLE_FP8"]
+EXPECTED_COMPATIBILITY_COMPILE_DEFINES = ["ENABLE_FP8"]
+EXPECTED_RUNNER_SCOPE_COMPILE_DEFINES = [
+    "WEINFER_DISABLE_FP8_RUNNER_BRANCHES"
+]
+EXPECTED_REMOVED_COMPILE_DEFINES = ["COMPILE_HOPPER_TMA_GEMMS"]
 EXPECTED_RUNTIME_BINDING = (
     "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
     "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
@@ -235,26 +267,36 @@ def verify_static() -> dict[str, Any]:
     ):
         raise RuntimeError("FlashInfer no-JIT source/marker drift")
 
-    fp4_header = (
+    fp8_runner_scope_marker_path = (
         flashinfer_root
-        / "data/csrc/nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
-        "include/moe_gemm_kernels.h"
+        / "data/csrc/fused_moe/cutlass_backend/"
+        ".weinfer-fp8-runner-scope.json"
     )
-    fp4_marker_path = fp4_header.parent / ".weinfer-fp4-header-fix.json"
-    if not fp4_header.is_file() or fp4_header.is_symlink():
-        raise RuntimeError("FlashInfer MoE GEMM header missing or symlinked")
-    fp4_marker = read_json(fp4_marker_path)
+    fp8_runner_scope_marker = read_json(fp8_runner_scope_marker_path)
     require_keys(
-        fp4_marker,
-        {"object", "policy", "preimage_sha256", "source_sha256"},
-        "FlashInfer FP4 header-fix marker",
+        fp8_runner_scope_marker,
+        {"object", "policy", "sources"},
+        "FlashInfer FP8 runner-scope marker",
     )
     if (
-        fp4_marker["object"] != "weinfer_flashinfer_fp4_header_fix_v1"
-        or fp4_marker["source_sha256"] != FLASHINFER_FP4_HEADER_SOURCE_SHA256
-        or sha256(fp4_header) != FLASHINFER_FP4_HEADER_SOURCE_SHA256
+        fp8_runner_scope_marker["object"]
+        != "weinfer_flashinfer_fp8_runner_scope_v1"
+        or fp8_runner_scope_marker["policy"]
+        != FLASHINFER_FP8_RUNNER_SCOPE_POLICY
+        or fp8_runner_scope_marker["sources"]
+        != FLASHINFER_FP8_RUNNER_SCOPE_SOURCES
     ):
-        raise RuntimeError("FlashInfer FP4 header source/marker drift")
+        raise RuntimeError("FlashInfer FP8 runner-scope marker drift")
+    for record in FLASHINFER_FP8_RUNNER_SCOPE_SOURCES:
+        source = flashinfer_root / record["path"]
+        if not source.is_file() or source.is_symlink():
+            raise RuntimeError(
+                f"FlashInfer FP8 runner-scope source missing or symlinked: {record['path']}"
+            )
+        if sha256(source) != record["source_sha256"]:
+            raise RuntimeError(
+                f"FlashInfer FP8 runner-scope source drift: {record['path']}"
+            )
 
     manifest = read_json(AOT_MANIFEST_PATH)
     require_keys(
@@ -282,8 +324,9 @@ def verify_static() -> dict[str, Any]:
         "cluster_shape": [1, 1, 1],
         "compiled_source_count": len(EXPECTED_FUSED_MOE_SOURCE_SUFFIXES),
         "compile_define": "FAST_BUILD",
+        "compatibility_compile_defines": EXPECTED_COMPATIBILITY_COMPILE_DEFINES,
         "cta_shape": [128, 128, 128],
-        "fp4_header_source_sha256": FLASHINFER_FP4_HEADER_SOURCE_SHA256,
+        "fp8_runner_scope_sources": FLASHINFER_FP8_RUNNER_SCOPE_SOURCES,
         "generated_tactic": EXPECTED_FUSED_MOE_TACTIC,
         "image_build_dynamic_load_validation": "torch.classes.FusedMoeRunner",
         "link_satisfaction_source": EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
@@ -292,6 +335,7 @@ def verify_static() -> dict[str, Any]:
         ),
         "mainloop_schedule": "pingpong",
         "removed_compile_defines": EXPECTED_REMOVED_COMPILE_DEFINES,
+        "runner_scope_compile_defines": EXPECTED_RUNNER_SCOPE_COMPILE_DEFINES,
         "runtime_binding": EXPECTED_RUNTIME_BINDING,
         "scale_dtype": "ue8m0",
         "source_suffixes": EXPECTED_FUSED_MOE_SOURCE_SUFFIXES,
@@ -337,7 +381,9 @@ def verify_static() -> dict[str, Any]:
 
     return {
         "aot_manifest_sha256": sha256(AOT_MANIFEST_PATH),
-        "flashinfer_fp4_header_source_sha256": FLASHINFER_FP4_HEADER_SOURCE_SHA256,
+        "flashinfer_fp8_runner_scope_sources": (
+            FLASHINFER_FP8_RUNNER_SCOPE_SOURCES
+        ),
         "flashinfer_no_jit_source_sha256": FLASHINFER_SOURCE_SHA256,
         "profiles": sorted(contract["profiles"]),
         "vllm_backport_source_sha256": VLLM_SOURCE_SHA256,

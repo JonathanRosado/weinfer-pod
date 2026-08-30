@@ -34,7 +34,7 @@ RUN apt-get update \
         --sha256 "${FLASHINFER_SDIST_SHA256}" \
     && PYTHON_BIN="$(command -v python3)" \
         bash /weinfer/runtime/apply_vllm_h100_backport.sh \
-    && python3 /weinfer/runtime/apply_flashinfer_fp4_header_fix.py \
+    && python3 /weinfer/runtime/apply_flashinfer_fp8_runner_scope.py \
     && python3 /weinfer/runtime/apply_flashinfer_no_jit.py \
     && FLASHINFER_CUDA_ARCH_LIST=9.0 \
        FLASHINFER_WORKSPACE_BASE=/tmp/weinfer-flashinfer-build \

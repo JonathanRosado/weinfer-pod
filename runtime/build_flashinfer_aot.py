@@ -51,10 +51,37 @@ TARGET_STATIC_SOURCE_SUFFIXES = (
     "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
 )
 TARGET_SOURCE_SUFFIXES = TARGET_STATIC_SOURCE_SUFFIXES + (TARGET_GENERATED_SOURCE,)
-FP4_HEADER_SOURCE_SHA256 = (
-    "5e49703e055c8167b32a09a6b6b0ff09d499bf72e5e70e4a4bdd56304f21ca39"
+FP8_RUNNER_SCOPE_SOURCES = (
+    {
+        "path": (
+            "data/csrc/fused_moe/cutlass_backend/"
+            "cutlass_fused_moe_instantiation.cu"
+        ),
+        "preimage_sha256": (
+            "56c5cdb2e92fe48cbe8952e17e91d46ce61a82a45dca27f82fa13a43bacced1f"
+        ),
+        "source_sha256": (
+            "b24efa82fab95a873cb1e563cb1e140ed9bd2e0eabefb52ae895b6618b59b311"
+        ),
+    },
+    {
+        "path": (
+            "data/csrc/fused_moe/cutlass_backend/"
+            "flashinfer_cutlass_fused_moe_sm100_ops.cu"
+        ),
+        "preimage_sha256": (
+            "87bf2788f40f752bff7172c13758e6f99d48cb0b73eea11a9fc301203fe90655"
+        ),
+        "source_sha256": (
+            "81866ae743a6ca1c19cd7e1e55894163ddfe133c290a77f5c1f25249e41dc4b5"
+        ),
+    },
 )
-REMOVED_COMPILE_DEFINES = ("COMPILE_HOPPER_TMA_GEMMS", "ENABLE_FP8")
+REQUIRED_COMPATIBILITY_COMPILE_DEFINES = ("ENABLE_FP8",)
+REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES = (
+    "WEINFER_DISABLE_FP8_RUNNER_BRANCHES",
+)
+REMOVED_COMPILE_DEFINES = ("COMPILE_HOPPER_TMA_GEMMS",)
 RUNTIME_BINDING = (
     "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
     "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
@@ -101,9 +128,10 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
 
     # The frozen call path is BF16 activation x MXFP4 weight.  Ungrouped GEMM,
     # FP8 activation source files, FP16 and INT4 variants are outside that
-    # contract.  The image first applies an exact-hash header fix for the
-    # duplicate FP4 predicate that previously forced ENABLE_FP8 into this build;
-    # remove that define so the shared runner cannot retain unused FP8 branches.
+    # contract.  ENABLE_FP8 is retained only because vendored shared utilities
+    # place generic and BF16 PackType definitions behind it.  Exact-hash source
+    # transforms make the separate FP8 runner guards also require the image's
+    # scope define, disabling both explicit and binding-side demand.
     # Keep upstream's exact no-op fp8_blockscale link stub because the shared
     # binding still declares that runtime-selectable interface.  The exact
     # generated tactic and source list contain no FP8 activation kernel.
@@ -118,6 +146,17 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
         for define in REMOVED_COMPILE_DEFINES
     ):
         raise RuntimeError("FlashInfer removed compile define survived narrowing")
+    for define in REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES:
+        flag = f"-D{define}"
+        if flag not in spec.extra_cuda_cflags:
+            spec.extra_cuda_cflags.append(flag)
+        if spec.extra_cuda_cflags.count(flag) != 1:
+            raise RuntimeError(f"FlashInfer runner-scope define drift: {define}")
+    for define in REQUIRED_COMPATIBILITY_COMPILE_DEFINES:
+        if spec.extra_cuda_cflags.count(f"-D{define}") != 1:
+            raise RuntimeError(
+                f"FlashInfer required compatibility define drift: {define}"
+            )
     spec.sources = selected
 
     # FlashInfer's gen_jit_spec eagerly writes build.ninja before returning the
@@ -155,6 +194,18 @@ def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
             raise RuntimeError(
                 f"emitted FlashInfer Ninja graph retained forbidden flag {forbidden}"
             )
+    for define in REQUIRED_COMPATIBILITY_COMPILE_DEFINES:
+        required = f"-D{define}"
+        if ninja.count(required) != 1:
+            raise RuntimeError(
+                f"emitted FlashInfer Ninja graph lost compatibility flag {required}"
+            )
+    for define in REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES:
+        required = f"-D{define}"
+        if ninja.count(required) != 1:
+            raise RuntimeError(
+                f"emitted FlashInfer Ninja graph lost runner-scope flag {required}"
+            )
     return {
         "module": spec.name,
         "ninja_sha256": sha256(spec.ninja_path),
@@ -180,6 +231,7 @@ def narrow_fused_moe_spec(spec):
         "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS",
         "-DENABLE_BF16",
         "-DENABLE_FP4",
+        "-DENABLE_FP8",
         "-DUSING_OSS_CUTLASS_MOE_GEMM",
     }
     observed_cuda_flags = set(spec.extra_cuda_cflags or [])
@@ -287,7 +339,10 @@ def main() -> int:
             "compile_define": "FAST_BUILD",
             "cta_shape": [128, 128, 128],
             "generated_tactic": TARGET_TACTIC,
-            "fp4_header_source_sha256": FP4_HEADER_SOURCE_SHA256,
+            "compatibility_compile_defines": list(
+                REQUIRED_COMPATIBILITY_COMPILE_DEFINES
+            ),
+            "fp8_runner_scope_sources": list(FP8_RUNNER_SCOPE_SOURCES),
             "image_build_dynamic_load_validation": fused_moe_load_validation,
             "link_satisfaction_source": UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
             "link_satisfaction_source_sha256": (
@@ -295,6 +350,9 @@ def main() -> int:
             ),
             "mainloop_schedule": "pingpong",
             "removed_compile_defines": list(REMOVED_COMPILE_DEFINES),
+            "runner_scope_compile_defines": list(
+                REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES
+            ),
             "runtime_binding": RUNTIME_BINDING,
             "scale_dtype": "ue8m0",
             "source_suffixes": list(TARGET_SOURCE_SUFFIXES),
