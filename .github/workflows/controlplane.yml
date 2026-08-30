@@ -224,6 +224,9 @@ jobs:
         run: |
           COLLECTOR=ci/profile_collect.sh \
             bash controlplane/ci/profile_collect_regression.sh
+      - name: profile-aware customer canary regression
+        run: |
+          python3 controlplane/ci/canary_traversal_profile_regression.py
       - name: same-session retention pair contract
         run: |
           DEPLOY_SCRIPT=controlplane/ci/retention_pair_deploy_v0_9.sh \

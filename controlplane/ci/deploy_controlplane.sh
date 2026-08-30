@@ -837,4 +837,4 @@ else
   echo "  ONGOING BURN: pod \$${POD_RATE:-?}/hr with run-scoped storage — founder-visible, deliberate"
 fi
 echo
-echo "next: scripts/canary_traversal.sh ${PUBLIC_BASE} ${CRED_FILE}"
+echo "next: CANARY_RUN_ID=<unique-run-id> CANARY_SERVING_PROFILE=${SERVING_PROFILE} scripts/canary_traversal.sh ${PUBLIC_BASE} ${CRED_FILE}"
