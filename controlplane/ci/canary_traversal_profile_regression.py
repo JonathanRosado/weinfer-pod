@@ -16,7 +16,6 @@ from typing import Any
 
 SCRIPT = Path(__file__).with_name("canary_traversal.sh")
 CREDITS = 2_000_000
-MAX_TOKENS = 16
 
 
 def ceil_price(tokens: int, rate: int) -> int:
@@ -30,12 +29,13 @@ class Profile:
     context: int
     input_price: int
     output_price: int
+    max_tokens: int
     deadline: int
 
     @property
     def hold(self) -> int:
         return ceil_price(self.context, self.input_price) + ceil_price(
-            MAX_TOKENS, self.output_price
+            self.max_tokens, self.output_price
         )
 
     @property
@@ -49,6 +49,7 @@ QWEN = Profile(
     context=8192,
     input_price=100_000,
     output_price=400_000,
+    max_tokens=16,
     deadline=1200,
 )
 H100 = Profile(
@@ -57,13 +58,22 @@ H100 = Profile(
     context=131_072,
     input_price=900_000,
     output_price=2_700_000,
+    max_tokens=8192,
     deadline=2400,
 )
 
 
 class State:
-    def __init__(self, profile: Profile):
+    def __init__(
+        self,
+        profile: Profile,
+        *,
+        content: str = "canary-ok",
+        completion_tokens: int = 1,
+    ):
         self.profile = profile
+        self.content = content
+        self.completion_tokens = completion_tokens
         self.credits = 0
         self.reserved = 0
         self.spent = 0
@@ -81,14 +91,19 @@ class State:
         }
 
     def terminal(self) -> dict[str, Any]:
-        charge = self.profile.charge
+        charge = ceil_price(10, self.profile.input_price) + ceil_price(
+            self.completion_tokens, self.profile.output_price
+        )
         return {
             "job_id": "job-profile-canary",
             "status": "completed",
             "response": {
-                "choices": [{"message": {"content": "canary-ok"}}],
+                "choices": [{"message": {"content": self.content}}],
             },
-            "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": self.completion_tokens,
+            },
             "charge": {
                 "total_micro_usd": charge,
                 "input_price_micro_per_mtok": self.profile.input_price,
@@ -141,7 +156,7 @@ def handler_for(state: State):
                 return
             if self.path == "/v1/jobs/job-profile-canary":
                 state.reserved = 0
-                state.spent = state.profile.charge
+                state.spent = state.terminal()["charge"]["total_micro_usd"]
                 self.send_json(200, state.terminal())
                 return
             if self.path == "/v1/usage":
@@ -173,7 +188,7 @@ def handler_for(state: State):
                 state.deadlines.append(self.headers.get("x-weinfer-deadline-seconds"))
                 if (
                     body.get("model") != state.profile.model
-                    or body.get("max_tokens") != MAX_TOKENS
+                    or body.get("max_tokens") != state.profile.max_tokens
                     or self.headers.get("Idempotency-Key") is None
                 ):
                     self.send_json(400, {"error": "wrong profile job"})
@@ -231,7 +246,7 @@ def run_profile(profile: Profile, *, explicit_profile: bool) -> None:
             assert state.models == [profile.model, profile.model], state.models
             assert state.deadlines == [str(profile.deadline)] * 2, state.deadlines
             assert state.reserved == 0
-            assert state.spent == profile.charge
+            assert state.spent == state.terminal()["charge"]["total_micro_usd"]
             pointer = json.loads((artifacts / "run.json").read_text())
             assert pointer["serving_profile"] == profile.name, pointer
             assert pointer["model"] == profile.model, pointer
@@ -290,16 +305,69 @@ def invalid_deadline_refuses_before_transport() -> None:
         assert "curl:" not in completed.stderr
 
 
+def h100_output_cap_hit_names_the_failure() -> None:
+    state = State(
+        H100,
+        content="reasoning fragment without a final answer",
+        completion_tokens=H100.max_tokens,
+    )
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(state))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="weinfer-profile-cap-red.") as raw:
+            root = Path(raw)
+            credentials = root / "credentials.env"
+            credentials.write_text("WEINFER_ADMIN_KEY=profile-admin-key\n")
+            credentials.chmod(0o600)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HOME": str(root / "home"),
+                    "CANARY_RUN_ID": "regression-h100-cap-hit",
+                    "CANARY_SERVING_PROFILE": H100.name,
+                    "CANARY_ARTIFACT_DIR": str(root / "artifacts"),
+                    "CANARY_KEY_STORE": str(root / "keys"),
+                    "CANARY_POLL_BUDGET_SECONDS": str(H100.deadline),
+                }
+            )
+            completed = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPT),
+                    f"http://127.0.0.1:{server.server_port}",
+                    str(credentials),
+                ],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            assert completed.returncode != 0
+            assert "OUTPUT CAP HIT" in completed.stderr, completed.stderr
+            assert "NOT an image/AOT compatibility failure" in completed.stderr
+            assert "task answer is not exactly" not in completed.stderr
+            assert state.job_posts == 2, state.job_posts
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def main() -> int:
+    assert QWEN.hold == 827, QWEN.hold
+    assert H100.hold == 140_084, H100.hold
     run_profile(QWEN, explicit_profile=False)
     run_profile(H100, explicit_profile=True)
     unknown_profile_refuses_before_transport()
     invalid_deadline_refuses_before_transport()
+    h100_output_cap_hit_names_the_failure()
     print(
         "CANARY PROFILE REGRESSION PASS: Qwen default and H100 explicit traverse "
         "priced discovery, exact reservation, replay, settlement, and usage on "
         "loopback; unknown profile and invalid deadline refuse before transport "
-        "(4 cases)"
+        "and an H100 completion at its output cap is classified separately "
+        "from image/AOT compatibility (5 cases)"
     )
     return 0
 

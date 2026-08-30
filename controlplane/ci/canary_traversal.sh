@@ -25,6 +25,7 @@ case "$SERVING_PROFILE" in
     CONTEXT_TOKENS=8192
     INPUT_PRICE=100000
     OUTPUT_PRICE=400000
+    MAX_TOKENS=16
     DEFAULT_DEADLINE_SECONDS=1200
     ;;
   gpt-oss-120b-h100-v1)
@@ -32,6 +33,12 @@ case "$SERVING_PROFILE" in
     CONTEXT_TOKENS=131072
     INPUT_PRICE=900000
     OUTPUT_PRICE=2700000
+    # GPT-OSS may consume completion tokens in its reasoning channel before
+    # emitting the tiny final answer.  Sixteen is the Qwen canary's bound, not
+    # a valid compatibility probe for a reasoning model.  This is only an
+    # output allowance: billing and the terminal assertion still use actual
+    # tokens, and the required visible answer remains exactly `canary-ok`.
+    MAX_TOKENS=8192
     DEFAULT_DEADLINE_SECONDS=2400
     ;;
   *)
@@ -46,7 +53,6 @@ ADMIN_KEY=$(awk -F= '/^WEINFER_ADMIN_KEY=/{print $2}' "$CRED_FILE" | awk '{print
 ORG="org-canary-${RUN_ID}"
 IDEM="canary-${RUN_ID}-1"
 CREDITS=2000000
-MAX_TOKENS=16
 # The reservation is derived from the selected profile's exact catalog
 # authority.  It is never a hand-maintained second copy of either profile's
 # arithmetic: ceil(context * input rate / 1e6) plus ceil(max output * output
@@ -256,7 +262,31 @@ print(json.loads(sys.argv[1])['response']['choices'][0]['message']['content'])
 PY
 )
   answer_ok "$CONTENT" || {
-    echo "task answer is not exactly canary-ok: ${CONTENT}" >&2
+    ANSWER_FAILURE=$(python3 - "$S" "$MAX_TOKENS" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1]).get("usage", {}).get("completion_tokens")
+cap = int(sys.argv[2])
+if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    print("invalid_usage")
+elif value == cap:
+    print("output_cap_hit")
+elif value > cap:
+    print("usage_over_cap")
+else:
+    print("semantic_mismatch")
+PY
+)
+    case "$ANSWER_FAILURE" in
+      output_cap_hit)
+        echo "OUTPUT CAP HIT: completion_tokens reached max_tokens=${MAX_TOKENS}; semantic canary result unresolved, NOT an image/AOT compatibility failure" >&2
+        ;;
+      semantic_mismatch)
+        echo "task answer is not exactly canary-ok: ${CONTENT}" >&2
+        ;;
+      *)
+        echo "invalid completion-token accounting while classifying wrong answer: ${ANSWER_FAILURE}" >&2
+        ;;
+    esac
     exit 1
   }
   python3 - "$MAX_TOKENS" "$INPUT_PRICE" "$OUTPUT_PRICE" "$S" <<'PY'
