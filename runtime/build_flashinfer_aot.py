@@ -120,7 +120,7 @@ EXACT_MXFP4_RUNNER_SCOPE_SOURCES = (
             "bb8cae4c049566f040098fe73e3669adaf672f7eea760c2aa1dc64ece890e740"
         ),
         "source_sha256": (
-            "df2ad905c041c2b28edf265e8538d0d89571cd9a97a4a17a892c10dc5c33168e"
+            "749abd05d89dfcd36e0a7a8985afe3fcc4b26842045da3f68c6b3895e736dc2b"
         ),
     },
 )

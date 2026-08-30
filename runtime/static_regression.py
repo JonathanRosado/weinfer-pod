@@ -276,6 +276,12 @@ def main() -> int:
         b"WeInfer exact SM90 BF16/MXFP4 tactic dispatch refused config"
         in exact_runner_scope.DISPATCH_PREFIX
     )
+    assert b"defined(FAST_BUILD)" in exact_runner_scope.CANDIDATE_PREFIX
+    assert b"FAST_BUILD" not in exact_runner_scope.DISPATCH_PREFIX
+    assert (
+        b"defined(COMPILE_HOPPER_TMA_GROUPED_GEMMS)"
+        in exact_runner_scope.DISPATCH_PREFIX
+    )
 
     aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
     assert len(aot.TARGET_SOURCE_SUFFIXES) == 14

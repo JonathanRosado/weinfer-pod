@@ -122,8 +122,8 @@ DISPATCH_END = (
     b"}  // namespace tensorrt_llm::kernels::cutlass_kernels\n"
 )
 DISPATCH_PREFIX = f"""#if defined({SCOPE_DEFINE})
-#if !defined(FAST_BUILD) || !defined(COMPILE_HOPPER_TMA_GROUPED_GEMMS)
-#error "WeInfer exact SM90 BF16/MXFP4 tactic dispatch requires FAST_BUILD and grouped Hopper GEMM"
+#if !defined(COMPILE_HOPPER_TMA_GROUPED_GEMMS)
+#error "WeInfer exact SM90 BF16/MXFP4 tactic dispatch requires grouped Hopper GEMM"
 #endif
 template <typename T, typename WeightType, typename GemmOutputType, typename EpilogueTag,
           int PackedScalesNum>
@@ -251,7 +251,7 @@ TARGETS = (
             "bb8cae4c049566f040098fe73e3669adaf672f7eea760c2aa1dc64ece890e740"
         ),
         "source_sha256": (
-            "df2ad905c041c2b28edf265e8538d0d89571cd9a97a4a17a892c10dc5c33168e"
+            "749abd05d89dfcd36e0a7a8985afe3fcc4b26842045da3f68c6b3895e736dc2b"
         ),
     },
 )
