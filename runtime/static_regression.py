@@ -173,11 +173,48 @@ def main() -> int:
         synthetic = synthetic.replace(old, new)
     assert synthetic.count(b"FLASHINFER_DISABLE_JIT") == 3
 
+    aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
+    assert len(aot.TARGET_SOURCE_SUFFIXES) == 13
+    assert aot.TARGET_SOURCE_SUFFIXES[-1] == (
+        "weinfer_exact_sm90_bf16_mxfp4.generated.cu"
+    )
+    forbidden = ("fp8", "fp16", "uint4", "uint8", "fp32")
+    for suffix in aot.TARGET_STATIC_SOURCE_SUFFIXES:
+        assert not any(value in Path(suffix).name for value in forbidden), suffix
+    assert aot.TARGET_TACTIC.endswith(
+        "1x1x1_warpspecialized_pingpong_epi_tma"
+    )
+    assert verifier.EXPECTED_FUSED_MOE_TACTIC == aot.TARGET_TACTIC
+    assert verifier.EXPECTED_FUSED_MOE_SOURCE_SUFFIXES == list(
+        aot.TARGET_SOURCE_SUFFIXES
+    )
+    assert verifier.EXPECTED_RUNTIME_BINDING == aot.RUNTIME_BINDING
+
+    class SyntheticOperation:
+        def __init__(self, name: str):
+            self.name = name
+
+        def __repr__(self) -> str:
+            return self.name
+
+    target = SyntheticOperation(aot.TARGET_TACTIC)
+    wrong = SyntheticOperation(aot.TARGET_TACTIC.replace("bf16", "fp16", 1))
+    assert aot.select_target_operation([wrong, target]) is target
+    for operations in ([wrong], [target, SyntheticOperation(aot.TARGET_TACTIC)]):
+        try:
+            aot.select_target_operation(operations)
+            raise AssertionError("non-unique AOT tactic selection passed")
+        except RuntimeError as exc:
+            assert "expected one exact SM90 BF16/MXFP4 tactic" in str(exc)
+
     waiter = load_module("wait_for_engine", RUNTIME / "wait_for_engine.py")
     assert waiter.pid_alive(os.getpid()) is True
     assert waiter.pid_alive(2**31 - 1) is False
 
-    print("PASS: pinned base + exact profiles + H100 argv + no-JIT transform + fail-closed profile gate")
+    print(
+        "PASS: pinned base + exact profiles + H100 argv + one SM90 BF16/MXFP4 "
+        "AOT tactic + no-JIT transform + fail-closed profile gate"
+    )
     return 0
 
 

@@ -6,11 +6,14 @@ and the WeInfer pull worker's entrypoint. Built and pushed to GHCR by CI;
 worker binaries are attached to releases and pinned by sha256 at pod boot.
 
 The `gpt-oss-120b-h100-v1` profile bakes `flashinfer-python==0.3.1`,
-the exact vLLM FP8-KV-scale backport, and the three SM90 FlashInfer
-operators observed in the frozen H100 launch into the image. Runtime JIT
-entry points are disabled; missing or drifting AOT bytes fail before vLLM
-or the worker starts. The runtime verifier also requires one SM90 H100,
-FlashAttention 3, and the `SM90_FI_MXFP4_BF16` backend.
+the exact vLLM FP8-KV-scale backport, and three SM90 FlashInfer modules into
+the image.  The expensive fused-MoE module is intentionally narrower than a
+general FlashInfer build: it contains the one BF16-activation/MXFP4-weight
+tactic selected by FlashInfer's upstream `FAST_BUILD` contract.  Its tactic,
+source set, and AOT-before-JIT runtime binding are recorded in the image
+manifest. Runtime JIT entry points are disabled; missing or drifting AOT bytes
+fail before vLLM or the worker starts. The runtime verifier also requires one
+SM90 H100, FlashAttention 3, and the `SM90_FI_MXFP4_BF16` backend.
 
 Engine readiness is part of each named profile, not a shared timeout. The
 H100 profile allows 1,200 seconds at no more than $2.70/hour: a never-ready

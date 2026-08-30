@@ -52,10 +52,35 @@ QWEN_CANONICAL_ARGS = (
 )
 EXPECTED_PROFILES = {"gpt-oss-120b-h100-v1", "qwen7b-consumer-v1"}
 EXPECTED_OPERATORS = {
-    "fused_moe_90": 100_000_000,
+    "fused_moe_90": 1_000_000,
     "sampling": 1_000_000,
     "trtllm_utils": 100_000,
 }
+EXPECTED_FUSED_MOE_TACTIC = (
+    "gemm_grouped_sm90_nv_bf16_nv_e2m1_ue8m0_bf16_bf16_fgs_lc_"
+    "128x128x128_0x0x0_0_1x1x1_warpspecialized_pingpong_epi_tma"
+)
+EXPECTED_FUSED_MOE_SOURCE_SUFFIXES = [
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
+    "moe_gemm_tma_warp_specialized_input.cu",
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
+    "moe_gemm_kernels_bf16_fp4.cu",
+    "fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_sm100_ops.cu",
+    "fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu",
+    "nv_internal/cpp/common/envUtils.cpp",
+    "nv_internal/cpp/common/logger.cpp",
+    "nv_internal/cpp/common/stringUtils.cpp",
+    "nv_internal/cpp/common/tllmException.cpp",
+    "nv_internal/cpp/common/memoryUtils.cu",
+    "nv_internal/tensorrt_llm/kernels/preQuantScaleKernel.cu",
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.cpp",
+    "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
+    "weinfer_exact_sm90_bf16_mxfp4.generated.cu",
+]
+EXPECTED_RUNTIME_BINDING = (
+    "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
+    "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
+)
 
 
 def sha256(path: Path) -> str:
@@ -202,6 +227,7 @@ def verify_static() -> dict[str, Any]:
             "build_mode",
             "cuda_arch",
             "flashinfer_python_version",
+            "fused_moe_build",
             "object",
             "operators",
         },
@@ -214,6 +240,22 @@ def verify_static() -> dict[str, Any]:
         or manifest["flashinfer_python_version"] != FLASHINFER_VERSION
     ):
         raise RuntimeError("FlashInfer AOT manifest authority drift")
+    fused_moe_build = manifest["fused_moe_build"]
+    if fused_moe_build != {
+        "activation_dtype": "bfloat16",
+        "cluster_shape": [1, 1, 1],
+        "compiled_source_count": len(EXPECTED_FUSED_MOE_SOURCE_SUFFIXES),
+        "compile_define": "FAST_BUILD",
+        "cta_shape": [128, 128, 128],
+        "generated_tactic": EXPECTED_FUSED_MOE_TACTIC,
+        "mainloop_schedule": "pingpong",
+        "runtime_binding": EXPECTED_RUNTIME_BINDING,
+        "scale_dtype": "ue8m0",
+        "source_suffixes": EXPECTED_FUSED_MOE_SOURCE_SUFFIXES,
+        "upstream_fast_build": True,
+        "weight_dtype": "mxfp4_e2m1",
+    }:
+        raise RuntimeError("FlashInfer fused-MoE AOT scope drift")
     rows = manifest["operators"]
     if not isinstance(rows, list) or len(rows) != len(EXPECTED_OPERATORS):
         raise RuntimeError("FlashInfer AOT operator count drift")

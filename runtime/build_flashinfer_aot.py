@@ -14,6 +14,36 @@ from pathlib import Path
 MANIFEST = Path("/weinfer/runtime/flashinfer-aot-manifest.json")
 EXPECTED_ARCH = "9.0"
 EXPECTED_VERSION = "0.3.1"
+TARGET_TACTIC = (
+    "gemm_grouped_sm90_nv_bf16_nv_e2m1_ue8m0_bf16_bf16_fgs_lc_"
+    "128x128x128_0x0x0_0_1x1x1_warpspecialized_pingpong_epi_tma"
+)
+TARGET_GENERATED_SOURCE = "weinfer_exact_sm90_bf16_mxfp4.generated.cu"
+TARGET_GENERATED_LAUNCHER = (
+    "tensorrt_llm/kernels/cutlass_kernels/moe_gemm/launchers/"
+    "moe_gemm_tma_ws_mixed_input_launcher.inl"
+)
+TARGET_STATIC_SOURCE_SUFFIXES = (
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
+    "moe_gemm_tma_warp_specialized_input.cu",
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
+    "moe_gemm_kernels_bf16_fp4.cu",
+    "fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_sm100_ops.cu",
+    "fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu",
+    "nv_internal/cpp/common/envUtils.cpp",
+    "nv_internal/cpp/common/logger.cpp",
+    "nv_internal/cpp/common/stringUtils.cpp",
+    "nv_internal/cpp/common/tllmException.cpp",
+    "nv_internal/cpp/common/memoryUtils.cu",
+    "nv_internal/tensorrt_llm/kernels/preQuantScaleKernel.cu",
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.cpp",
+    "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
+)
+TARGET_SOURCE_SUFFIXES = TARGET_STATIC_SOURCE_SUFFIXES + (TARGET_GENERATED_SOURCE,)
+RUNTIME_BINDING = (
+    "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
+    "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
+)
 
 
 def sha256(path: Path) -> str:
@@ -22,6 +52,84 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def select_target_operation(operations):
+    """Select the one generator record named by FlashInfer's SM90 fast build."""
+    matches = [operation for operation in operations if repr(operation) == TARGET_TACTIC]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one exact SM90 BF16/MXFP4 tactic, observed {len(matches)}"
+        )
+    return matches[0]
+
+
+def source_for_suffix(sources: list[Path], suffix: str) -> Path:
+    matches = [source for source in sources if source.as_posix().endswith(suffix)]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one FlashInfer source ending in {suffix}, observed {len(matches)}"
+        )
+    return matches[0]
+
+
+def narrow_fused_moe_spec(spec):
+    """Bind the AOT module to FlashInfer's single upstream fast-build tactic."""
+    from flashinfer.jit import env as jit_env
+    from flashinfer.jit.cutlass_gemm.generate_kernels import (
+        generate_sm90_mixed_type_grouped_gemm_operations,
+        write_file,
+    )
+
+    if (
+        spec.name != "fused_moe_90"
+        or (spec.extra_cflags or []).count("-DFAST_BUILD") != 1
+    ):
+        raise RuntimeError("FlashInfer SM90 fast-build contract drift")
+    required_cuda_flags = {
+        "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS",
+        "-DENABLE_BF16",
+        "-DENABLE_FP4",
+        "-DUSING_OSS_CUTLASS_MOE_GEMM",
+    }
+    observed_cuda_flags = set(spec.extra_cuda_cflags or [])
+    if not required_cuda_flags.issubset(observed_cuda_flags):
+        raise RuntimeError("FlashInfer SM90 BF16/MXFP4 compile flags drift")
+
+    operation = select_target_operation(
+        generate_sm90_mixed_type_grouped_gemm_operations(True)
+    )
+    generated = (
+        jit_env.FLASHINFER_CSRC_DIR
+        / "nv_internal/tensorrt_llm/cutlass_instantiations/90"
+        / TARGET_GENERATED_SOURCE
+    )
+    write_file([TARGET_GENERATED_LAUNCHER], [operation], str(generated))
+
+    selected = [
+        source_for_suffix(spec.sources, suffix)
+        for suffix in TARGET_STATIC_SOURCE_SUFFIXES
+    ] + [generated]
+    observed_suffixes = tuple(
+        suffix
+        for source in selected
+        for suffix in TARGET_SOURCE_SUFFIXES
+        if source.as_posix().endswith(suffix)
+    )
+    if observed_suffixes != TARGET_SOURCE_SUFFIXES:
+        raise RuntimeError("narrow FlashInfer AOT source set drift")
+
+    # The frozen call path is BF16 activation x MXFP4 weight.  FP8 activation,
+    # ungrouped GEMM, FP16 and INT4 variants are outside that contract.
+    spec.extra_cuda_cflags = [
+        flag
+        for flag in (spec.extra_cuda_cflags or [])
+        if flag not in {"-DENABLE_FP8", "-DCOMPILE_HOPPER_TMA_GEMMS"}
+    ]
+    if "-DENABLE_FP8" in spec.extra_cuda_cflags:
+        raise RuntimeError("FP8 activation re-entered the narrow AOT build")
+    spec.sources = selected
+    return spec
 
 
 def main() -> int:
@@ -40,7 +148,7 @@ def main() -> int:
     from flashinfer.tllm_utils import gen_trtllm_utils_module
 
     specs = [
-        gen_cutlass_fused_moe_sm90_module(),
+        narrow_fused_moe_spec(gen_cutlass_fused_moe_sm90_module(use_fast_build=True)),
         gen_sampling_module(),
         gen_trtllm_utils_module(),
     ]
@@ -69,6 +177,20 @@ def main() -> int:
         "build_mode": "image_build_aot_no_runtime_compilation",
         "cuda_arch": EXPECTED_ARCH,
         "flashinfer_python_version": EXPECTED_VERSION,
+        "fused_moe_build": {
+            "activation_dtype": "bfloat16",
+            "cluster_shape": [1, 1, 1],
+            "compiled_source_count": len(specs[0].sources),
+            "compile_define": "FAST_BUILD",
+            "cta_shape": [128, 128, 128],
+            "generated_tactic": TARGET_TACTIC,
+            "mainloop_schedule": "pingpong",
+            "runtime_binding": RUNTIME_BINDING,
+            "scale_dtype": "ue8m0",
+            "source_suffixes": list(TARGET_SOURCE_SUFFIXES),
+            "upstream_fast_build": True,
+            "weight_dtype": "mxfp4_e2m1",
+        },
         "object": "weinfer_flashinfer_aot_manifest_v1",
         "operators": rows,
     }
