@@ -11,7 +11,13 @@ the image.  The expensive fused-MoE module is intentionally narrower than a
 general FlashInfer build: it contains the one BF16-activation/MXFP4-weight
 tactic selected by FlashInfer's upstream `FAST_BUILD` contract.  Its tactic,
 source set, and AOT-before-JIT runtime binding are recorded in the image
-manifest. Runtime JIT entry points are disabled; missing or drifting AOT bytes
+manifest. The upstream `ENABLE_FP8` define is retained only because the vendored
+FP4 header requires that companion guard; no FP8 activation tactic or source is
+compiled, and the manifest records the compatibility define explicitly.
+FlashInfer's misleadingly named `flashinfer_cutlass_fused_moe_sm100_ops.cu` is
+also retained and named in the manifest because upstream uses it as the shared
+PyTorch binding source for both its SM90 and SM100 module generators.
+Runtime JIT entry points are disabled; missing or drifting AOT bytes
 fail before vLLM or the worker starts. The runtime verifier also requires one
 SM90 H100, FlashAttention 3, and the `SM90_FI_MXFP4_BF16` backend.
 

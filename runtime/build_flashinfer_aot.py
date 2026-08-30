@@ -23,12 +23,15 @@ TARGET_GENERATED_LAUNCHER = (
     "tensorrt_llm/kernels/cutlass_kernels/moe_gemm/launchers/"
     "moe_gemm_tma_ws_mixed_input_launcher.inl"
 )
+UPSTREAM_SHARED_BINDING_SOURCE = (
+    "fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_sm100_ops.cu"
+)
 TARGET_STATIC_SOURCE_SUFFIXES = (
     "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
     "moe_gemm_tma_warp_specialized_input.cu",
     "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
     "moe_gemm_kernels_bf16_fp4.cu",
-    "fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_sm100_ops.cu",
+    UPSTREAM_SHARED_BINDING_SOURCE,
     "fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu",
     "nv_internal/cpp/common/envUtils.cpp",
     "nv_internal/cpp/common/logger.cpp",
@@ -40,6 +43,7 @@ TARGET_STATIC_SOURCE_SUFFIXES = (
     "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
 )
 TARGET_SOURCE_SUFFIXES = TARGET_STATIC_SOURCE_SUFFIXES + (TARGET_GENERATED_SOURCE,)
+HEADER_COMPATIBILITY_DEFINES = ("ENABLE_FP8",)
 RUNTIME_BINDING = (
     "flashinfer.fused_moe.core:get_cutlass_fused_moe_module->"
     "flashinfer.jit.core:JitSpec.build_and_load:is_aot"
@@ -84,15 +88,19 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
     if observed_suffixes != TARGET_SOURCE_SUFFIXES:
         raise RuntimeError("narrow FlashInfer AOT source set drift")
 
-    # The frozen call path is BF16 activation x MXFP4 weight.  FP8 activation,
-    # ungrouped GEMM, FP16 and INT4 variants are outside that contract.
+    # The frozen call path is BF16 activation x MXFP4 weight.  Ungrouped GEMM,
+    # FP8 activation source files, FP16 and INT4 variants are outside that
+    # contract.  Keep ENABLE_FP8: the vendored moe_gemm_kernels.h declares its
+    # FP4 predicate twice when ENABLE_FP4 is set without this upstream companion
+    # guard.  The exact generated tactic and source list still contain no FP8
+    # activation kernel.
     spec.extra_cuda_cflags = [
         flag
         for flag in (spec.extra_cuda_cflags or [])
-        if flag not in {"-DENABLE_FP8", "-DCOMPILE_HOPPER_TMA_GEMMS"}
+        if flag != "-DCOMPILE_HOPPER_TMA_GEMMS"
     ]
-    if "-DENABLE_FP8" in spec.extra_cuda_cflags:
-        raise RuntimeError("FP8 activation re-entered the narrow AOT build")
+    if spec.extra_cuda_cflags.count("-DENABLE_FP8") != 1:
+        raise RuntimeError("FlashInfer FP4 header compatibility define drift")
     spec.sources = selected
 
     # FlashInfer's gen_jit_spec eagerly writes build.ninja before returning the
@@ -124,7 +132,11 @@ def verify_emitted_ninja(spec, selected: list[Path]) -> dict[str, object]:
         )
     if ninja.count("-DFAST_BUILD") != 1:
         raise RuntimeError("emitted FlashInfer Ninja graph lost FAST_BUILD")
-    for forbidden in ("-DENABLE_FP8", "-DCOMPILE_HOPPER_TMA_GEMMS"):
+    if ninja.count("-DENABLE_FP8") != 1:
+        raise RuntimeError(
+            "emitted FlashInfer Ninja graph lost ENABLE_FP8 header compatibility define"
+        )
+    for forbidden in ("-DCOMPILE_HOPPER_TMA_GEMMS",):
         if forbidden in ninja:
             raise RuntimeError(
                 f"emitted FlashInfer Ninja graph retained forbidden flag {forbidden}"
@@ -153,6 +165,7 @@ def narrow_fused_moe_spec(spec):
     required_cuda_flags = {
         "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS",
         "-DENABLE_BF16",
+        "-DENABLE_FP8",
         "-DENABLE_FP4",
         "-DUSING_OSS_CUTLASS_MOE_GEMM",
     }
@@ -234,11 +247,13 @@ def main() -> int:
             "compile_define": "FAST_BUILD",
             "cta_shape": [128, 128, 128],
             "generated_tactic": TARGET_TACTIC,
+            "header_compatibility_defines": list(HEADER_COMPATIBILITY_DEFINES),
             "mainloop_schedule": "pingpong",
             "runtime_binding": RUNTIME_BINDING,
             "scale_dtype": "ue8m0",
             "source_suffixes": list(TARGET_SOURCE_SUFFIXES),
             "upstream_fast_build": True,
+            "upstream_shared_binding_source": UPSTREAM_SHARED_BINDING_SOURCE,
             "weight_dtype": "mxfp4_e2m1",
         },
         "object": "weinfer_flashinfer_aot_manifest_v1",

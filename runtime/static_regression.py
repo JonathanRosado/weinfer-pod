@@ -189,6 +189,13 @@ def main() -> int:
     assert verifier.EXPECTED_FUSED_MOE_SOURCE_SUFFIXES == list(
         aot.TARGET_SOURCE_SUFFIXES
     )
+    assert verifier.EXPECTED_HEADER_COMPATIBILITY_DEFINES == list(
+        aot.HEADER_COMPATIBILITY_DEFINES
+    )
+    assert (
+        verifier.EXPECTED_UPSTREAM_SHARED_BINDING_SOURCE
+        == aot.UPSTREAM_SHARED_BINDING_SOURCE
+    )
     assert verifier.EXPECTED_RUNTIME_BINDING == aot.RUNTIME_BINDING
 
     class SyntheticOperation:
@@ -229,7 +236,10 @@ def main() -> int:
             self.write_count += 1
             self.written_sources = tuple(self.sources)
             self.written_cuda_flags = tuple(self.extra_cuda_cflags)
-            lines = ["cflags = -DFAST_BUILD"]
+            lines = [
+                "cflags = -DFAST_BUILD",
+                "cuda_cflags = " + " ".join(self.extra_cuda_cflags),
+            ]
             lines.extend(
                 f"build $name/{source.stem}.o: "
                 f"{'cuda_compile' if source.suffix == '.cu' else 'compile'} "
@@ -244,15 +254,24 @@ def main() -> int:
         assert aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected) is synthetic_spec
         assert synthetic_spec.write_count == 1
         assert synthetic_spec.written_sources == tuple(selected)
-        assert "-DENABLE_FP8" not in synthetic_spec.written_cuda_flags
+        assert synthetic_spec.written_cuda_flags.count("-DENABLE_FP8") == 1
         assert "-DCOMPILE_HOPPER_TMA_GEMMS" not in synthetic_spec.written_cuda_flags
         assert "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS" in synthetic_spec.written_cuda_flags
         graph = aot.verify_emitted_ninja(synthetic_spec, selected)
         assert graph["source_count"] == 13
         assert len(graph["ninja_sha256"]) == 64
+        good_ninja = synthetic_spec.ninja_path.read_text()
         synthetic_spec.ninja_path.write_text(
-            synthetic_spec.ninja_path.read_text()
-            + "build $name/stale.o: cuda_compile /flashinfer/stale.cu\n",
+            good_ninja.replace("-DENABLE_FP8", ""),
+            encoding="utf-8",
+        )
+        try:
+            aot.verify_emitted_ninja(synthetic_spec, selected)
+            raise AssertionError("missing FP4 header compatibility define passed")
+        except RuntimeError as exc:
+            assert "lost ENABLE_FP8 header compatibility define" in str(exc)
+        synthetic_spec.ninja_path.write_text(
+            good_ninja + "build $name/stale.o: cuda_compile /flashinfer/stale.cu\n",
             encoding="utf-8",
         )
         try:
