@@ -146,11 +146,13 @@ def validate_projection(
             raise ProfileContractError("H100 profile must contain one hardware identity")
         row = hardware[0]
         if not isinstance(row, dict) or (
-            row.get("gpu_sku") != "NVIDIA H100 80GB HBM3"
+            row.get("gpu_sku") != "NVIDIA H100 NVL"
             or row.get("cuda_class") != profile.get("cuda_class")
-            or row.get("vram_gb") != 80
+            or row.get("vram_gb") != 94
         ):
-            raise ProfileContractError("H100 launch identity contradicts the runtime contract")
+            raise ProfileContractError(
+                "registered H100 launch identity contradicts the runtime contract"
+            )
     return profile
 
 
