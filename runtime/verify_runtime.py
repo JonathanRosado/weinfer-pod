@@ -63,11 +63,19 @@ EXPECTED_FUSED_MOE_TACTIC = (
 EXPECTED_UPSTREAM_SHARED_BINDING_SOURCE = (
     "fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_sm100_ops.cu"
 )
+EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE = (
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+    "fp8_blockscale_gemm/fp8_blockscale_gemm_stub.cu"
+)
+EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256 = (
+    "aae25878e2520693265c46e073b74f9a8f4f7daa351fc80b6f9a7fc8227c4257"
+)
 EXPECTED_FUSED_MOE_SOURCE_SUFFIXES = [
     "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
     "moe_gemm_tma_warp_specialized_input.cu",
     "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
     "moe_gemm_kernels_bf16_fp4.cu",
+    EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
     EXPECTED_UPSTREAM_SHARED_BINDING_SOURCE,
     "fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu",
     "nv_internal/cpp/common/envUtils.cpp",
@@ -253,6 +261,11 @@ def verify_static() -> dict[str, Any]:
         "cta_shape": [128, 128, 128],
         "generated_tactic": EXPECTED_FUSED_MOE_TACTIC,
         "header_compatibility_defines": EXPECTED_HEADER_COMPATIBILITY_DEFINES,
+        "image_build_dynamic_load_validation": "torch.classes.FusedMoeRunner",
+        "link_satisfaction_source": EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
+        "link_satisfaction_source_sha256": (
+            EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
+        ),
         "mainloop_schedule": "pingpong",
         "runtime_binding": EXPECTED_RUNTIME_BINDING,
         "scale_dtype": "ue8m0",
@@ -334,6 +347,25 @@ def verify_profile(contract: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return profile_name, profile
 
 
+def scan_runtime_workspace(workspace: Path) -> list[dict[str, str]]:
+    """Record declarative graphs and refuse evidence that a compiler executed."""
+    build_graphs: list[dict[str, str]] = []
+    forbidden_names = {".ninja_deps", ".ninja_log"}
+    forbidden_suffixes = {".cubin", ".fatbin", ".o", ".ptx", ".so"}
+    if workspace.exists():
+        for path in workspace.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(workspace).as_posix()
+            if path.name == "build.ninja":
+                build_graphs.append({"path": relative, "sha256": sha256(path)})
+            elif path.name in forbidden_names or path.suffix in forbidden_suffixes:
+                raise RuntimeError(
+                    f"runtime FlashInfer compiled artifact present: {relative}"
+                )
+    return sorted(build_graphs, key=lambda row: row["path"])
+
+
 def verify_h100_runtime() -> dict[str, Any]:
     expected_environment = {
         "CUDA_VISIBLE_DEVICES": "0",
@@ -384,15 +416,12 @@ def verify_h100_runtime() -> dict[str, Any]:
         raise RuntimeError("H100 MXFP4 backend did not resolve to SM90_FI_MXFP4_BF16")
 
     # Direct and batch compilation are structurally disabled by the verified
-    # source above. Refuse as well if any compiled runtime artifact pre-exists.
-    forbidden_names = {"build.ninja"}
-    forbidden_suffixes = {".cubin", ".fatbin", ".o", ".so"}
-    if workspace.exists():
-        for path in workspace.rglob("*"):
-            if path.is_file() and (
-                path.name in forbidden_names or path.suffix in forbidden_suffixes
-            ):
-                raise RuntimeError("runtime FlashInfer compilation artifact present")
+    # source above. FlashInfer eagerly writes build.ninja while constructing a
+    # JitSpec, before build_and_load discovers the installed AOT object. That
+    # graph is not evidence of compilation. Record it, but refuse compiler
+    # outputs and Ninja execution metadata; those can exist only if a runtime
+    # build actually ran.
+    build_graphs = scan_runtime_workspace(workspace)
 
     return {
         "attention_backend": "FLASH_ATTN",
@@ -400,6 +429,7 @@ def verify_h100_runtime() -> dict[str, Any]:
         "flash_attention_version": 3,
         "gpu": name.strip(),
         "mxfp4_backend": mxfp4_backend.name,
+        "runtime_build_graphs": build_graphs,
         "runtime_jit": "disabled",
     }
 

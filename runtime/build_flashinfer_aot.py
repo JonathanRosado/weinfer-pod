@@ -26,11 +26,19 @@ TARGET_GENERATED_LAUNCHER = (
 UPSTREAM_SHARED_BINDING_SOURCE = (
     "fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_sm100_ops.cu"
 )
+UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE = (
+    "nv_internal/tensorrt_llm/kernels/cutlass_kernels/"
+    "fp8_blockscale_gemm/fp8_blockscale_gemm_stub.cu"
+)
+UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256 = (
+    "aae25878e2520693265c46e073b74f9a8f4f7daa351fc80b6f9a7fc8227c4257"
+)
 TARGET_STATIC_SOURCE_SUFFIXES = (
     "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
     "moe_gemm_tma_warp_specialized_input.cu",
     "nv_internal/tensorrt_llm/kernels/cutlass_kernels/moe_gemm/"
     "moe_gemm_kernels_bf16_fp4.cu",
+    UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
     UPSTREAM_SHARED_BINDING_SOURCE,
     "fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu",
     "nv_internal/cpp/common/envUtils.cpp",
@@ -92,8 +100,10 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
     # FP8 activation source files, FP16 and INT4 variants are outside that
     # contract.  Keep ENABLE_FP8: the vendored moe_gemm_kernels.h declares its
     # FP4 predicate twice when ENABLE_FP4 is set without this upstream companion
-    # guard.  The exact generated tactic and source list still contain no FP8
-    # activation kernel.
+    # guard.  That define makes the shared runner reference the upstream
+    # fp8_blockscale interface even though this launch never dispatches it, so
+    # retain upstream's no-op link stub as well.  The exact generated tactic and
+    # source list still contain no FP8 activation kernel.
     spec.extra_cuda_cflags = [
         flag
         for flag in (spec.extra_cuda_cflags or [])
@@ -187,12 +197,27 @@ def narrow_fused_moe_spec(spec):
         source_for_suffix(spec.sources, suffix)
         for suffix in TARGET_STATIC_SOURCE_SUFFIXES
     ] + [generated]
+    link_stub = source_for_suffix(
+        selected, UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE
+    )
+    if sha256(link_stub) != UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256:
+        raise RuntimeError("FlashInfer FP8 blockscale link stub source drift")
     narrowed = reemit_narrow_fused_moe_spec(spec, selected)
     print(
         json.dumps(verify_emitted_ninja(narrowed, selected), sort_keys=True),
         flush=True,
     )
     return narrowed
+
+
+def validate_fused_moe_aot_load(spec, shared_object: Path) -> str:
+    """Exercise the exact torch.classes load path before publishing the image."""
+    if spec.name != "fused_moe_90":
+        raise RuntimeError("AOT load validation received the wrong operator")
+    runner = spec.load(shared_object, class_name="FusedMoeRunner")
+    if runner is None:
+        raise RuntimeError("FlashInfer fused-MoE AOT load returned no runner")
+    return "torch.classes.FusedMoeRunner"
 
 
 def main() -> int:
@@ -220,6 +245,7 @@ def main() -> int:
     build_jit_specs(specs, verbose=True, skip_prebuilt=False)
 
     rows = []
+    fused_moe_load_validation = None
     for spec in specs:
         source = spec.jit_library_path
         destination = spec.aot_path
@@ -227,6 +253,14 @@ def main() -> int:
             raise SystemExit(f"FlashInfer AOT build did not produce {spec.name}")
         destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+        if spec.name == "fused_moe_90":
+            # A shared object can link successfully while retaining undefined
+            # symbols that fail only when torch loads it.  The first live H100
+            # boot exposed exactly that gap, so exercise the same class-loader
+            # path during the build while all pinned dependencies are present.
+            fused_moe_load_validation = validate_fused_moe_aot_load(
+                spec, destination
+            )
         rows.append(
             {
                 "bytes": destination.stat().st_size,
@@ -235,6 +269,9 @@ def main() -> int:
                 "sha256": sha256(destination),
             }
         )
+
+    if fused_moe_load_validation is None:
+        raise SystemExit("FlashInfer fused-MoE AOT load validation did not run")
 
     manifest = {
         "build_mode": "image_build_aot_no_runtime_compilation",
@@ -248,6 +285,11 @@ def main() -> int:
             "cta_shape": [128, 128, 128],
             "generated_tactic": TARGET_TACTIC,
             "header_compatibility_defines": list(HEADER_COMPATIBILITY_DEFINES),
+            "image_build_dynamic_load_validation": fused_moe_load_validation,
+            "link_satisfaction_source": UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
+            "link_satisfaction_source_sha256": (
+                UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
+            ),
             "mainloop_schedule": "pingpong",
             "runtime_binding": RUNTIME_BINDING,
             "scale_dtype": "ue8m0",

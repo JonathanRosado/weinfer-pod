@@ -185,12 +185,27 @@ def main() -> int:
     assert synthetic.count(b"FLASHINFER_DISABLE_JIT") == 3
 
     aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
-    assert len(aot.TARGET_SOURCE_SUFFIXES) == 13
+    assert len(aot.TARGET_SOURCE_SUFFIXES) == 14
     assert aot.TARGET_SOURCE_SUFFIXES[-1] == (
         "weinfer_exact_sm90_bf16_mxfp4.generated.cu"
     )
+    assert (
+        aot.UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE
+        in aot.TARGET_STATIC_SOURCE_SUFFIXES
+    )
+    assert (
+        verifier.EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE
+        == aot.UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE
+    )
+    assert (
+        verifier.EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
+        == aot.UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SHA256
+        == "aae25878e2520693265c46e073b74f9a8f4f7daa351fc80b6f9a7fc8227c4257"
+    )
     forbidden = ("fp8", "fp16", "uint4", "uint8", "fp32")
     for suffix in aot.TARGET_STATIC_SOURCE_SUFFIXES:
+        if suffix == aot.UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE:
+            continue
         assert not any(value in Path(suffix).name for value in forbidden), suffix
     assert aot.TARGET_TACTIC.endswith(
         "1x1x1_warpspecialized_pingpong_epi_tma"
@@ -268,7 +283,7 @@ def main() -> int:
         assert "-DCOMPILE_HOPPER_TMA_GEMMS" not in synthetic_spec.written_cuda_flags
         assert "-DCOMPILE_HOPPER_TMA_GROUPED_GEMMS" in synthetic_spec.written_cuda_flags
         graph = aot.verify_emitted_ninja(synthetic_spec, selected)
-        assert graph["source_count"] == 13
+        assert graph["source_count"] == 14
         assert len(graph["ninja_sha256"]) == 64
         good_ninja = synthetic_spec.ninja_path.read_text()
         synthetic_spec.ninja_path.write_text(
@@ -288,12 +303,66 @@ def main() -> int:
             aot.verify_emitted_ninja(synthetic_spec, selected)
             raise AssertionError("stale full Ninja graph passed")
         except RuntimeError as exc:
-            assert "expected 13, observed 14" in str(exc)
+            assert "expected 14, observed 15" in str(exc)
         try:
             aot.reemit_narrow_fused_moe_spec(synthetic_spec, selected[:-1])
             raise AssertionError("incomplete narrow source set passed")
         except RuntimeError as exc:
             assert "narrow FlashInfer AOT source set drift" in str(exc)
+
+    class SyntheticLoadSpec:
+        name = "fused_moe_90"
+
+        def __init__(self) -> None:
+            self.calls = []
+
+        def load(self, path: Path, class_name: str | None = None):
+            self.calls.append((path, class_name))
+            return object()
+
+    synthetic_load = SyntheticLoadSpec()
+    synthetic_library = Path("/flashinfer/aot/fused_moe_90.so")
+    assert (
+        aot.validate_fused_moe_aot_load(synthetic_load, synthetic_library)
+        == "torch.classes.FusedMoeRunner"
+    )
+    assert synthetic_load.calls == [(synthetic_library, "FusedMoeRunner")]
+    synthetic_load.name = "sampling"
+    try:
+        aot.validate_fused_moe_aot_load(synthetic_load, synthetic_library)
+        raise AssertionError("wrong AOT operator passed fused-MoE load validation")
+    except RuntimeError as exc:
+        assert "wrong operator" in str(exc)
+
+    with tempfile.TemporaryDirectory() as temporary:
+        workspace = Path(temporary)
+        operator = workspace / "cached_ops" / "fused_moe_90"
+        operator.mkdir(parents=True)
+        graph_path = operator / "build.ninja"
+        graph_path.write_text("rule cuda_compile\n", encoding="utf-8")
+        assert verifier.scan_runtime_workspace(workspace) == [
+            {
+                "path": "cached_ops/fused_moe_90/build.ninja",
+                "sha256": hashlib.sha256(graph_path.read_bytes()).hexdigest(),
+            }
+        ]
+
+    for relative in (
+        "cached_ops/fused_moe_90/fused_moe_90.so",
+        "cached_ops/fused_moe_90/kernel.o",
+        "cached_ops/fused_moe_90/kernel.ptx",
+        "cached_ops/.ninja_log",
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            artifact = workspace / relative
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(b"compiled")
+            try:
+                verifier.scan_runtime_workspace(workspace)
+                raise AssertionError(f"runtime compiled artifact passed: {relative}")
+            except RuntimeError as exc:
+                assert relative in str(exc)
 
     waiter = load_module("wait_for_engine", RUNTIME / "wait_for_engine.py")
     assert waiter.pid_alive(os.getpid()) is True
