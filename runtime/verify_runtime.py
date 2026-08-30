@@ -32,7 +32,7 @@ VLLM_SOURCE_SHA256 = "a8a13a30446f621a190674663e46c00a1e49175ce5591c1b05aaa79bab
 FLASHINFER_VERSION = "0.3.1"
 FLASHINFER_SOURCE_SHA256 = "dbca0c0c36d4fd2f559021b5d9c356681501b14a3cf2ec3d37d53d17527dcc7b"
 H100_CANONICAL_ARGS = (
-    "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 4 "
+    "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 8 "
     "--gpu-memory-utilization 0.95 --enable-chunked-prefill "
     "--enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8 "
     "--calculate-kv-scales --tensor-parallel-size 1 "

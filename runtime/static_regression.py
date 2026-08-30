@@ -76,7 +76,7 @@ def main() -> int:
     h100_args = shlex.split(h100["vllm_canonical_args"])
     expected_values = {
         "--max-num-batched-tokens": "8192",
-        "--max-num-seqs": "4",
+        "--max-num-seqs": "8",
         "--gpu-memory-utilization": "0.95",
         "--dtype": "bfloat16",
         "--kv-cache-dtype": "fp8",
