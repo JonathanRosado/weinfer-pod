@@ -31,6 +31,25 @@ VLLM_PATCH_SHA256 = "69e6909b439a45baf68ea9fe02f5ca208aea5aa62e1eaf4e559f26a5537
 VLLM_SOURCE_SHA256 = "a8a13a30446f621a190674663e46c00a1e49175ce5591c1b05aaa79bab888567"
 FLASHINFER_VERSION = "0.3.1"
 FLASHINFER_SOURCE_SHA256 = "dbca0c0c36d4fd2f559021b5d9c356681501b14a3cf2ec3d37d53d17527dcc7b"
+H100_CANONICAL_ARGS = (
+    "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 4 "
+    "--gpu-memory-utilization 0.95 --enable-chunked-prefill "
+    "--enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8 "
+    "--calculate-kv-scales --tensor-parallel-size 1 "
+    "--served-model-name openai/gpt-oss-120b "
+    "--ignore-patterns original/* metal/* "
+    "--revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a "
+    "--tokenizer-revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a "
+    "--max-model-len 131072"
+)
+QWEN_CANONICAL_ARGS = (
+    "--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 "
+    "--gpu-memory-utilization 0.92 --enable-chunked-prefill "
+    "--enable-prefix-caching "
+    "--revision a09a35458c702b33eeacc393d103063234e8bc28 "
+    "--tokenizer-revision a09a35458c702b33eeacc393d103063234e8bc28 "
+    "--max-model-len 8192"
+)
 EXPECTED_PROFILES = {"gpt-oss-120b-h100-v1", "qwen7b-consumer-v1"}
 EXPECTED_OPERATORS = {
     "fused_moe_90": 100_000_000,
@@ -94,6 +113,7 @@ def verify_contract() -> dict[str, Any]:
         or h100["cuda_class"] != "12"
         or h100["engine_ready_timeout_seconds"] != 1200
         or h100["max_provider_rate_micro_per_hour"] != 2700000
+        or h100["vllm_canonical_args"] != H100_CANONICAL_ARGS
     ):
         raise RuntimeError("H100 profile authority drift")
     # A never-ready engine must lose to the transaction's $1 GPU ceiling.
@@ -126,6 +146,7 @@ def verify_contract() -> dict[str, Any]:
         or qwen["max_context_tokens"] != 8192
         or qwen["engine_ready_timeout_seconds"] != 3600
         or qwen["max_provider_rate_micro_per_hour"] != 400000
+        or qwen["vllm_canonical_args"] != QWEN_CANONICAL_ARGS
     ):
         raise RuntimeError("Qwen profile authority drift")
     return contract

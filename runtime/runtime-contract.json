@@ -10,7 +10,7 @@
       "model_revision": "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
       "required_hardware": "one NVIDIA H100 with compute capability 9.0",
       "tokenizer_revision": "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
-      "vllm_canonical_args": "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 4 --gpu-memory-utilization 0.95 --enable-chunked-prefill --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8 --calculate-kv-scales --tensor-parallel-size 1 --served-model-name gpt-oss-120b --ignore-patterns original/* metal/* --revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a --tokenizer-revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a --max-model-len 131072"
+      "vllm_canonical_args": "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 4 --gpu-memory-utilization 0.95 --enable-chunked-prefill --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8 --calculate-kv-scales --tensor-parallel-size 1 --served-model-name openai/gpt-oss-120b --ignore-patterns original/* metal/* --revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a --tokenizer-revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a --max-model-len 131072"
     },
     "qwen7b-consumer-v1": {
       "engine_ready_timeout_seconds": 3600,

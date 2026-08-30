@@ -80,7 +80,7 @@ def main() -> int:
         "--dtype": "bfloat16",
         "--kv-cache-dtype": "fp8",
         "--tensor-parallel-size": "1",
-        "--served-model-name": "gpt-oss-120b",
+        "--served-model-name": h100["model"],
         "--revision": h100["model_revision"],
         "--tokenizer-revision": h100["tokenizer_revision"],
         "--max-model-len": "131072",
