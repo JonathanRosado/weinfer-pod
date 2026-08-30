@@ -43,7 +43,7 @@ CONTROL_POD="${5:?control-plane pod id required (killed FIRST on breach)}"
 STATE_FILE="${6:-/tmp/gpu_watchdog_state.json}"
 INTERVAL="${WEINFER_WATCHDOG_INTERVAL:-60}"
 API="${WEINFER_RUNPOD_API:-https://api.runpod.io/v2}"
-MAX_RATE_USD_HR="${WEINFER_MAX_GPU_RATE:-0.40}"   # fail-closed accrual rate
+MAX_RATE_USD_HR="${WEINFER_MAX_GPU_RATE:-}"
 STANDDOWN_FILE="${WEINFER_WATCHDOG_STANDDOWN_FILE:-}"
 
 require_launchd_observer() {
@@ -58,6 +58,20 @@ require_launchd_observer() {
 }
 
 require_launchd_observer
+[ -n "$MAX_RATE_USD_HR" ] || {
+  echo "WATCHDOG ARM REFUSED: WEINFER_MAX_GPU_RATE is required for fail-closed accrual" >&2
+  exit 1
+}
+python3 - "$MAX_RATE_USD_HR" <<'PY' || exit 1
+from decimal import Decimal, InvalidOperation
+import sys
+try:
+    value = Decimal(sys.argv[1])
+except InvalidOperation:
+    raise SystemExit("WATCHDOG ARM REFUSED: WEINFER_MAX_GPU_RATE must be a decimal")
+if not value.is_finite() or value <= 0:
+    raise SystemExit("WATCHDOG ARM REFUSED: WEINFER_MAX_GPU_RATE must be finite and positive")
+PY
 [ -f "$KEY_FILE" ] || { echo "key file missing" >&2; exit 1; }
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 

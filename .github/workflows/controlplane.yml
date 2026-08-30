@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 env:
-  GATEWAY_TAG: gateway-v0.24.0
+  GATEWAY_TAG: gateway-v0.25.0
   WORKER_TAG: worker-v0.6.0
 
 jobs:
@@ -203,6 +203,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: immutable worker-image contract gate
+        run: |
+          python3 controlplane/ci/verify_oci_image_contract_regression.py
+          ADMIN_KEY=ci-contract-admin \
+          CUSTOMER_KEY=ci-contract-customer \
+          WORKER_KEY=ci-contract-worker \
+          WEINFER_SERVING_PROFILE=gpt-oss-120b-h100-v1 \
+            bash controlplane/ci/deploy_controlplane.sh --render-env \
+              > h100-contract-env.json
+          IMAGE="$(python3 -c 'import json; print(json.load(open("h100-contract-env.json"))["WEINFER_IMAGE"])')"
+          CONTRACT="$(sha256sum runtime/runtime-contract.json | awk '{print $1}')"
+          python3 controlplane/ci/verify_oci_image_contract.py "$IMAGE" "$CONTRACT"
       - name: sealed-evidence regression (no claim beyond the sealed record)
         run: |
           DEPLOY_SCRIPT=ci/deploy_controlplane.sh \
@@ -261,7 +273,8 @@ jobs:
           sleep 1
           # The EXACT deploy env, from the deploy script's own assembly.
           ADMIN_KEY=ci-admin CUSTOMER_KEY=ci-customer WORKER_KEY=ci-worker \
-            bash controlplane/ci/deploy_controlplane.sh --render-env > env.json
+            WEINFER_SERVING_PROFILE=qwen7b-consumer-v1 \
+              bash controlplane/ci/deploy_controlplane.sh --render-env > env.json
           python3 - <<'PYEOF'
           import json
           env = json.load(open("env.json"))

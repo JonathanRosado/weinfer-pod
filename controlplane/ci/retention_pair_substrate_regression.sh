@@ -14,6 +14,7 @@ grep -q 'RETENTION SUBSTRATE PASS' "$test_tmp/frozen.out"
 ADMIN_KEY="retention-regression-admin" \
   CUSTOMER_KEY="retention-regression-customer" \
   WORKER_KEY="retention-regression-worker" \
+  WEINFER_SERVING_PROFILE="qwen7b-consumer-v1" \
   WEINFER_DEMAND_QUIET_CYCLES=3 \
   bash "$LIVE_DEPLOY" --render-env > "$test_tmp/live.json" 2> "$test_tmp/live.err"
 python3 - "$test_tmp/live.json" <<'PY'
@@ -21,7 +22,7 @@ import json
 import sys
 
 value = json.load(open(sys.argv[1]))
-assert value["WEINFER_GATEWAY_SHA256"] == "cc97e659266a3d2be00ce579a0effea7cc53bbc80c95612b897497fc6399fbcd"
+assert value["WEINFER_GATEWAY_SHA256"] == "18ab0571ed8ae38edbf5461f5b509f293ff5e0f36002443c2683bc853d421719"
 assert value["WEINFER_BOOTSTRAP_MODE"] == "1"
 hardware = json.loads(value["WEINFER_BOOTSTRAP_HARDWARE"])
 assert len(hardware) == 11

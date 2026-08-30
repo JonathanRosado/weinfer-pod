@@ -66,6 +66,7 @@ python3 "$FAKE" "$PORT" & FAKE_PID=$!
 sleep 1
 rm -f /tmp/fake-official-deletes.log /tmp/wd-state.json /tmp/wd.log
 printf 'fake-key' > /tmp/wd-key
+export WEINFER_MAX_GPU_RATE=0.40
 
 # --- Arming contract: persistent observers are launchd-only --------
 # An interactive shell on macOS can inherit XPC_SERVICE_NAME=0, so a mere
@@ -112,6 +113,40 @@ done
 kill "$ARM_PID" 2>/dev/null; wait "$ARM_PID" 2>/dev/null || true
 [ -f /tmp/wd-arm-launchd.json ] || { echo "FAIL: armed observer created no state"; exit 1; }
 echo "ok: observer arming — absent/zero XPC refused pre-state; com.weinfer launchd accepted"
+
+# The observer body itself must not resurrect the former consumer-card default.
+# A custom or drifted plist without the explicit profile ceiling refuses before
+# state creation, so H100 blindness can never accrue at $0.40/hour by omission.
+rm -f /tmp/wd-arm-missing-rate.json /tmp/wd-arm-missing-rate.log
+set +e
+env -u WEINFER_MAX_GPU_RATE XPC_SERVICE_NAME=com.weinfer.test.watchdog \
+  bash "$WATCHDOG" /tmp/wd-key "$(date +%s)" 5.00 "$PREFIX" cp-none \
+    /tmp/wd-arm-missing-rate.json > /tmp/wd-arm-missing-rate.log 2>&1
+MISSING_RATE_CODE=$?
+set -e
+[ "$MISSING_RATE_CODE" -ne 0 ] || { echo "FAIL: missing maximum GPU rate armed"; exit 1; }
+[ ! -e /tmp/wd-arm-missing-rate.json ] || { echo "FAIL: missing rate created state"; exit 1; }
+grep -q 'WEINFER_MAX_GPU_RATE is required' /tmp/wd-arm-missing-rate.log || {
+  echo "FAIL: missing-rate refusal was not explicit"; cat /tmp/wd-arm-missing-rate.log; exit 1;
+}
+echo "ok: observer arming — missing maximum GPU rate refuses before state"
+
+for BAD_RATE in 0 -0.01 NaN not-a-number; do
+  rm -f /tmp/wd-arm-invalid-rate.json /tmp/wd-arm-invalid-rate.log
+  set +e
+  env WEINFER_MAX_GPU_RATE="$BAD_RATE" \
+  XPC_SERVICE_NAME=com.weinfer.test.watchdog \
+    bash "$WATCHDOG" /tmp/wd-key "$(date +%s)" 5.00 "$PREFIX" cp-none \
+      /tmp/wd-arm-invalid-rate.json > /tmp/wd-arm-invalid-rate.log 2>&1
+  INVALID_RATE_CODE=$?
+  set -e
+  [ "$INVALID_RATE_CODE" -ne 0 ] || { echo "FAIL: invalid maximum GPU rate armed: $BAD_RATE"; exit 1; }
+  [ ! -e /tmp/wd-arm-invalid-rate.json ] || { echo "FAIL: invalid rate created state: $BAD_RATE"; exit 1; }
+  grep -Eq 'must be (a decimal|finite and positive)' /tmp/wd-arm-invalid-rate.log || {
+    echo "FAIL: invalid-rate refusal was not explicit: $BAD_RATE"; cat /tmp/wd-arm-invalid-rate.log; exit 1;
+  }
+done
+echo "ok: observer arming — four malformed/non-positive maximum rates refuse before state"
 
 # The remaining scenarios own every child lifetime explicitly; this escape
 # hatch exists only so the regression can exercise the observer loop directly.

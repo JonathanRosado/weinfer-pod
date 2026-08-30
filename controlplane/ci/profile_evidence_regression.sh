@@ -26,6 +26,7 @@ cd "$(dirname "$0")/.."
 DEPLOY_SCRIPT="${DEPLOY_SCRIPT:-scripts/deploy_controlplane.sh}"
 CONTRACT_FILE="${CONTRACT_FILE:-evidence/pair-p1787432264/run_contract.stacked.json}"
 CONTRACT_SHA="cbe07a73e5e60a1761937db267e9e37f6bdbe0ead1a2ee743235921015fbc2f3"
+export WEINFER_SERVING_PROFILE="qwen7b-consumer-v1"
 
 GOT_SHA=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$CONTRACT_FILE")
 [ "$GOT_SHA" = "$CONTRACT_SHA" ] || {

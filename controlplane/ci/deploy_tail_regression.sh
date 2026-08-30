@@ -20,6 +20,7 @@ sleep 1
 run_deploy() { # -> exit code in $DEPLOY_CODE, log in /tmp/deploy-tail.log
   set +e
   ADMIN_KEY=t CUSTOMER_KEY=t WORKER_KEY=t \
+  WEINFER_SERVING_PROFILE=qwen7b-consumer-v1 \
   WEINFER_DEPLOY_TEST=1 \
   WEINFER_DEPLOY_API_BASE="http://127.0.0.1:${PORT}" \
   WEINFER_DEPLOY_HEALTH_BASE="http://127.0.0.1:${PORT}" \

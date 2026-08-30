@@ -16,13 +16,30 @@
 # both binary sha256 values are pinned here; remote release metadata
 # is used only as a CONSISTENCY CHECK, never as the authority.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 # --render-env: print the EXACT pod env JSON and exit — no provider
 # calls, no credential writes.  The managed CI regression consumes
 # this so the environment it proves is the environment we deploy.
 RENDER_ONLY=0
 [ "${1:-}" = "--render-env" ] && RENDER_ONLY=1
+
+# A deployment is one named product profile.  Missing and unknown names refuse
+# before any trust-root fetch or provider call: a typo may never fall back to a
+# cheaper model while retaining the requested profile's labels.
+SERVING_PROFILE="${WEINFER_SERVING_PROFILE:-}"
+case "$SERVING_PROFILE" in
+  qwen7b-consumer-v1|gpt-oss-120b-h100-v1) ;;
+  "")
+    echo "WEINFER_SERVING_PROFILE is required" >&2
+    exit 1
+    ;;
+  *)
+    echo "unknown WEINFER_SERVING_PROFILE: ${SERVING_PROFILE}" >&2
+    exit 1
+    ;;
+esac
 
 CONTROLPLANE_STORAGE_MODE="${WEINFER_CONTROLPLANE_STORAGE_MODE:-network-volume}"
 case "$CONTROLPLANE_STORAGE_MODE" in
@@ -49,15 +66,44 @@ if not raw.isascii() or not raw.isdigit() or int(raw) <= 0:
 PY
 
 # Worker readiness is the LOCAL engine-health registration handshake, not a
-# provider status bit.  Two paid CUDA-13 RTX 3090 pods reached the old binary
-# default (120 probes x 10s = 20 minutes) with every job still pending.  A third
-# reached the registered 240-by-10-second allowance with the same zero-service
-# result.  The deployed environment now carries an explicit 60-minute bound to
-# keep the next cold pull alive without changing the scheduler's boot prior or
-# any customer deadline; the independent cumulative watchdog remains the spend
-# authority.
-READY_PROBE_BUDGET="${WEINFER_PROBE_BUDGET:-360}"
-READY_PROBE_DELAY_SECS="${WEINFER_PROBE_DELAY_SECS:-10}"
+# provider status bit.  The consumer profile retains its registered 60-minute
+# allowance.  The H100 profile is immutable at 126 x 10s: even if the image's
+# own 1,200s readiness bound is reached, provider-create through manager
+# deletion remains below the frozen $1 GPU ceiling at the profile's $2.70/hr
+# maximum.  A caller may restate an H100 value exactly, never widen it.
+# Keep these simple literal authorities: the completed N=24 protocol parses
+# and byte-binds the consumer profile rather than borrowing binary defaults.
+POLICY_BOOT_SEED_SECS="452"
+POLICY_TOKENS_PER_SEC="4000"
+if [ "$SERVING_PROFILE" = "qwen7b-consumer-v1" ]; then
+  READY_PROBE_BUDGET="${WEINFER_PROBE_BUDGET:-360}"
+  READY_PROBE_DELAY_SECS="${WEINFER_PROBE_DELAY_SECS:-10}"
+  BOOT_FRACTION="${WEINFER_BOOT_FRACTION:-0.2}"
+else
+  if [ -n "${WEINFER_PROBE_BUDGET+x}" ] && [ "$WEINFER_PROBE_BUDGET" != "126" ]; then
+    echo "gpt-oss-120b-h100-v1 requires WEINFER_PROBE_BUDGET=126" >&2
+    exit 1
+  fi
+  if [ -n "${WEINFER_PROBE_DELAY_SECS+x}" ] && [ "$WEINFER_PROBE_DELAY_SECS" != "10" ]; then
+    echo "gpt-oss-120b-h100-v1 requires WEINFER_PROBE_DELAY_SECS=10" >&2
+    exit 1
+  fi
+  if [ -n "${WEINFER_BOOT_FRACTION+x}" ] && [ "$WEINFER_BOOT_FRACTION" != "0.2" ]; then
+    echo "gpt-oss-120b-h100-v1 requires WEINFER_BOOT_FRACTION=0.2" >&2
+    exit 1
+  fi
+  READY_PROBE_BUDGET="126"
+  READY_PROBE_DELAY_SECS="10"
+  BOOT_FRACTION="0.2"
+  # Cost-derived readiness ceiling, not a measured H100 boot time.  The
+  # acquisition planner takes max(fleet floor, this profile bound).
+  POLICY_BOOT_SEED_SECS="1200"
+  # Conservative cross-launch-identity policy prior. The matching sealed
+  # seqs8 point was accepted with stability enforcement disabled (CV 0.494),
+  # so its 2768.891832 point estimate does not quantify a resolved gain. The
+  # new immutable image and worker remain unmeasured.
+  POLICY_TOKENS_PER_SEC="2600"
+fi
 python3 - "$READY_PROBE_BUDGET" "$READY_PROBE_DELAY_SECS" <<'PY'
 import sys
 
@@ -71,9 +117,9 @@ PY
 
 # Cold-start amortization target. Production keeps the shipped 20% default;
 # a registered deep-backlog measurement may lower it so the full intended
-# backlog is durably visible before acquisition. This affects only the cold
-# BootForBacklog threshold. Validate before any trust-root or provider work.
-BOOT_FRACTION="${WEINFER_BOOT_FRACTION:-0.2}"
+# backlog is durably visible before acquisition on the consumer profile.  The
+# H100 product profile is fixed at 20%. This affects only the cold BootForBacklog
+# threshold. Validate before any trust-root or provider work.
 python3 - "$BOOT_FRACTION" <<'PY'
 from decimal import Decimal, InvalidOperation
 import sys
@@ -90,10 +136,6 @@ if not value.is_finite() or not (Decimal(0) < value < Decimal(1)):
         f"WEINFER_BOOT_FRACTION must be a finite decimal strictly inside (0, 1), got {raw!r}"
     )
 PY
-# Freeze the other two inputs to the cold-backlog threshold explicitly rather
-# than inheriting binary defaults that a future release could change silently.
-POLICY_BOOT_SEED_SECS="452"
-POLICY_TOKENS_PER_SEC="4000"
 
 KEY_FILE="../rig/scaffold/runpod_account_a.txt"
 DEPLOY_TEST="${WEINFER_DEPLOY_TEST:-0}"
@@ -122,27 +164,48 @@ read_provider_key() {
 
 # ---------- pinned trust roots (verify remote against THESE) ----------
 CP_IMAGE="ghcr.io/jonathanrosado/weinfer-controlplane@sha256:693db10834a098d0267949098edc334593c5e418c3f8e6b5b944ee41d5b741de"
-GW_TAG="gateway-v0.24.0"
-GW_SHA="cc97e659266a3d2be00ce579a0effea7cc53bbc80c95612b897497fc6399fbcd"
+GW_TAG="gateway-v0.25.0"
+GW_SHA="18ab0571ed8ae38edbf5461f5b509f293ff5e0f36002443c2683bc853d421719"
 WORKER_TAG="worker-v0.6.0"
 WORKER_SHA="0d9b0be9c2a756716a5630966172c32f199e4387c7ee57bf8cb4ccc69f7354fe"
 POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:160a926826565b1ed0134335f3f68e65ed457fcb034058639fc5c9b5c7ec2613"
 QWEN_REV="a09a35458c702b33eeacc393d103063234e8bc28"
+H100_POD_IMAGE="ghcr.io/jonathanrosado/weinfer-pod@sha256:92377f4077b2faef0a1e1eec7cf56ffe2f04b3815e8254db87bd2a96f2cbe214"
+H100_REV="b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+RUNTIME_CONTRACT_SHA256=""
+if [ "$SERVING_PROFILE" = "gpt-oss-120b-h100-v1" ]; then
+  POD_IMAGE="$H100_POD_IMAGE"
+  RUNTIME_CONTRACT_PATH=""
+  for candidate in \
+    "$SCRIPT_DIR/../pod-image/runtime/runtime-contract.json" \
+    "$SCRIPT_DIR/../../runtime/runtime-contract.json"; do
+    if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
+      RUNTIME_CONTRACT_PATH="$candidate"
+      break
+    fi
+  done
+  [ -n "$RUNTIME_CONTRACT_PATH" ] || {
+    echo "gpt-oss-120b-h100-v1 runtime-contract authority is missing" >&2
+    exit 1
+  }
+  RUNTIME_CONTRACT_SHA256="$(python3 - "$RUNTIME_CONTRACT_PATH" <<'PY'
+import hashlib, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+)"
+fi
+python3 - "$SERVING_PROFILE" "$POD_IMAGE" <<'PY'
+import re, sys
+profile, image = sys.argv[1:]
+if re.fullmatch(r"ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}", image) is None:
+    raise SystemExit(
+        f"{profile} has an unresolved or non-immutable WEINFER image authority"
+    )
+PY
 
 GW_URL="https://github.com/JonathanRosado/weinfer-pod/releases/download/${GW_TAG}/weinfer-gateway"
 WORKER_URL="https://github.com/JonathanRosado/weinfer-pod/releases/download/${WORKER_TAG}/weinfer-worker"
-
-# Consistency check only — a sidecar mismatch means the release was
-# tampered with or republished; refuse to proceed either way.
-for pair in "$GW_URL.sha256:$GW_SHA" "$WORKER_URL.sha256:$WORKER_SHA"; do
-  url="${pair%:*}"; pinned="${pair##*:}"
-  remote="$(curl -fsSL "$url" | awk '{print $1}')"
-  [ "$remote" = "$pinned" ] || {
-    echo "TRUST ROOT MISMATCH for $url: remote $remote, pinned $pinned" >&2
-    exit 1
-  }
-done
-echo "trust roots consistent (gateway ${GW_SHA:0:12}…, worker ${WORKER_SHA:0:12}…)" >&2
 
 # ---------- burn ceiling ----------
 CEILING_CPU_USD_HR="0.10"     # refuse any CPU flavor above this
@@ -241,10 +304,34 @@ MAX_CTX=8192
 VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill --enable-prefix-caching"
 CONCURRENCY="64"
 ALLOC_CONF="expandable_segments:True"
+MODEL_REV="$QWEN_REV"
+TOKENIZER_REV="$QWEN_REV"
+POOL_NAME="community-qwen7b-0"
+LEGACY_GPU_TYPE="NVIDIA RTX A4500"
+MIN_VRAM_GB="20"
+MAX_GPU_RATE="0.40"
+POD_DISK_GB="40"
 # Keep the JSON on one physical line: --render-env is also consumed as a
 # Docker env-file by the release smoke, whose format does not permit embedded
 # newlines in values.
 DEFAULT_BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":2628,"throughput_seed_kind":"policy_prior","throughput_seed_source":"prior-calibration-v1; raw_seed=4000; basis=ready_window_tps_low; effective=floor(raw_seed*3943/6000)=2628; worst scored ratio across sealed seed4090-1787834610 and seed3090-1787841661; original_kind=policy_prior; no traffic observation for this SKU","boot_seed_micros":664034722,"drain_seed_micros":740377,"fixed_seed_kind":"policy_prior","fixed_seed_source":"max sealed activation=664034722 plus max sealed drain=740377 across batch-live-1787630415/A4500, amort3full-1787755326/SFF Ada, seed4090-1787834610/RTX 4090, and seed3090-1787841661/RTX 3090; no SKU traffic observation"},{"gpu_sku":"NVIDIA RTX 4000 SFF Ada Generation","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":2681,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed amort3full-1787755326; tps_low=2681; basis=ready_to_batch1_completion_rederived_from_sealed_phases; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 1/5 boots","boot_seed_micros":492992942,"drain_seed_micros":685232,"fixed_seed_kind":"traffic_observed_cross_identity","fixed_seed_source":"sealed amort3full-1787755326; activation=492992942; drain=685232; candidate_only 1/5 boots"},{"gpu_sku":"NVIDIA RTX A4500","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":4161,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed batch-live-1787630415; tps_low=4161; basis=ready_window_tps_low; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 2/5 boots","boot_seed_micros":429080126,"drain_seed_micros":731031,"fixed_seed_kind":"traffic_observed_cross_identity","fixed_seed_source":"sealed batch-live-1787630415; boot_high=429080126; drain=731031; candidate_only 2/5 boots"},{"gpu_sku":"NVIDIA RTX 4000 Ada Generation","cuda_class":"12","vram_gb":20,"throughput_seed_tokens_per_sec":2628,"throughput_seed_kind":"policy_prior","throughput_seed_source":"prior-calibration-v1; raw_seed=4000; basis=ready_window_tps_low; effective=floor(raw_seed*3943/6000)=2628; worst scored ratio across sealed seed4090-1787834610 and seed3090-1787841661; original_kind=policy_prior; no traffic observation for this SKU","boot_seed_micros":664034722,"drain_seed_micros":740377,"fixed_seed_kind":"policy_prior","fixed_seed_source":"max sealed activation=664034722 plus max sealed drain=740377 across batch-live-1787630415/A4500, amort3full-1787755326/SFF Ada, seed4090-1787834610/RTX 4090, and seed3090-1787841661/RTX 3090; no SKU traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":3943,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed seed3090-1787841661 profile candidate; tps_low=3943; basis=ready_window_tps_low; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 1/5 boots","boot_seed_micros":462995788,"drain_seed_micros":740377,"fixed_seed_kind":"traffic_observed_cross_identity","fixed_seed_source":"sealed seed3090-1787841661 profile candidate; activation=462995788; drain=740377; candidate_only 1/5 boots"},{"gpu_sku":"NVIDIA GeForce RTX 3090","cuda_class":"13","vram_gb":24,"throughput_seed_tokens_per_sec":3943,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed seed3090-1787841661 profile candidate; tps_low=3943; basis=ready_window_tps_low; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 1/5 boots; CUDA class 13 is an unmeasured exact-identity variant reusing this SKU prior","boot_seed_micros":462995788,"drain_seed_micros":740377,"fixed_seed_kind":"traffic_observed_cross_identity","fixed_seed_source":"sealed seed3090-1787841661 profile candidate; activation=462995788; drain=740377; candidate_only 1/5 boots; CUDA class 13 is an unmeasured exact-identity variant reusing this SKU prior"},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":4403,"throughput_seed_kind":"spec_derived","throughput_seed_source":"prior-calibration-v1; raw_seed=6700; basis=ready_window_tps_low; effective=floor(raw_seed*3943/6000)=4403; worst scored ratio across sealed seed4090-1787834610 and seed3090-1787841661; original=analytic-v1 FP16-compute extrapolation from sealed A4500 ready_window_tps_low anchor; no traffic observation for this SKU","boot_seed_micros":664034722,"drain_seed_micros":740377,"fixed_seed_kind":"policy_prior","fixed_seed_source":"max sealed activation=664034722 plus max sealed drain=740377 across batch-live-1787630415/A4500, amort3full-1787755326/SFF Ada, seed4090-1787834610/RTX 4090, and seed3090-1787841661/RTX 3090; no SKU traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 3090 Ti","cuda_class":"13","vram_gb":24,"throughput_seed_tokens_per_sec":4403,"throughput_seed_kind":"spec_derived","throughput_seed_source":"prior-calibration-v1; raw_seed=6700; basis=ready_window_tps_low; effective=floor(raw_seed*3943/6000)=4403; worst scored ratio across sealed seed4090-1787834610 and seed3090-1787841661; original=analytic-v1 FP16-compute extrapolation from sealed A4500 ready_window_tps_low anchor; no traffic observation for this SKU; CUDA class 13 is an unmeasured exact-identity variant reusing this SKU prior","boot_seed_micros":664034722,"drain_seed_micros":740377,"fixed_seed_kind":"policy_prior","fixed_seed_source":"max sealed activation=664034722 plus max sealed drain=740377 across batch-live-1787630415/A4500, amort3full-1787755326/SFF Ada, seed4090-1787834610/RTX 4090, and seed3090-1787841661/RTX 3090; no SKU traffic observation; CUDA class 13 is an unmeasured exact-identity variant reusing this SKU prior"},{"gpu_sku":"NVIDIA RTX A6000","cuda_class":"12","vram_gb":48,"throughput_seed_tokens_per_sec":4271,"throughput_seed_kind":"spec_derived","throughput_seed_source":"prior-calibration-v1; raw_seed=6500; basis=ready_window_tps_low; effective=floor(raw_seed*3943/6000)=4271; worst scored ratio across sealed seed4090-1787834610 and seed3090-1787841661; original=analytic-v1 FP16-compute extrapolation from sealed A4500 ready_window_tps_low anchor; no traffic observation for this SKU","boot_seed_micros":664034722,"drain_seed_micros":740377,"fixed_seed_kind":"policy_prior","fixed_seed_source":"max sealed activation=664034722 plus max sealed drain=740377 across batch-live-1787630415/A4500, amort3full-1787755326/SFF Ada, seed4090-1787834610/RTX 4090, and seed3090-1787841661/RTX 3090; no SKU traffic observation"},{"gpu_sku":"NVIDIA GeForce RTX 4090","cuda_class":"12","vram_gb":24,"throughput_seed_tokens_per_sec":9548,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed seed4090-1787834610 profile candidate; tps_low=9548; basis=ready_window_tps_low; workload_sha256=2392bb588923e88dc3f1473a9393a0e099a19a4889ccbd1d945b33df9e5ed205; candidate_only 1/5 boots","boot_seed_micros":664034722,"drain_seed_micros":633859,"fixed_seed_kind":"traffic_observed_cross_identity","fixed_seed_source":"sealed seed4090-1787834610 profile candidate; activation=664034722; drain=633859; candidate_only 1/5 boots"},{"gpu_sku":"NVIDIA A40","cuda_class":"12","vram_gb":48,"throughput_seed_tokens_per_sec":2628,"throughput_seed_kind":"policy_prior","throughput_seed_source":"prior-calibration-v1; raw_seed=4000; basis=ready_window_tps_low; effective=floor(raw_seed*3943/6000)=2628; worst scored ratio across sealed seed4090-1787834610 and seed3090-1787841661; original_kind=policy_prior; no traffic observation for this SKU","boot_seed_micros":664034722,"drain_seed_micros":740377,"fixed_seed_kind":"policy_prior","fixed_seed_source":"max sealed activation=664034722 plus max sealed drain=740377 across batch-live-1787630415/A4500, amort3full-1787755326/SFF Ada, seed4090-1787834610/RTX 4090, and seed3090-1787841661/RTX 3090; no SKU traffic observation"}]'
+H100_BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA H100 80GB HBM3","cuda_class":"12","vram_gb":80,"throughput_seed_tokens_per_sec":2600,"throughput_seed_kind":"traffic_observed_cross_identity","throughput_seed_source":"sealed company/research/bench_runs/cycle3-tokenbench-scan1/tb-sweep/points/n-sweep__seqs8-batch8192-cacheoff__n-32__arrival-saturation__repeat-0/load-report.json; sha256=f73161fa3331599e161970e643a9d3c7b4bdb8f2adcecc5145c792448cb9ec44; command.json sha256=4e4b5f8229bec7bfe0e3896be892ce9aa76d41bf5e71502ef36998ada2d43c37; max_num_seqs=8; max_num_batched_tokens=8192; prefix_caching=false; hardware=NVIDIA H100 80GB HBM3; model=gpt-oss-120b; tokenizer_revision=b5c939de8f754692c1647ca79fbf85e8c1e70f8a; observed_tps=2768.891832; require_stable=false; block_throughput_cv=0.49436819; block_count=5; point_estimate_only_no_resolved_seqs8_gain; policy_prior=2600; new immutable image and worker are unmeasured","boot_seed_micros":1200000000,"drain_seed_micros":30000000,"fixed_seed_kind":"policy_prior","fixed_seed_source":"cost-derived readiness ceiling: 1200s at 2700000 uUSD/hr = 900000 uUSD; drain=30s policy allowance; no lifecycle observation for this image and worker"}]'
+
+if [ "$SERVING_PROFILE" = "gpt-oss-120b-h100-v1" ]; then
+  SERVED_MODEL="openai/gpt-oss-120b"
+  MODEL_REV="$H100_REV"
+  TOKENIZER_REV="$H100_REV"
+  MAX_CTX=131072
+  VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 8 --gpu-memory-utilization 0.95 --enable-chunked-prefill --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8 --calculate-kv-scales --tensor-parallel-size 1 --served-model-name openai/gpt-oss-120b --ignore-patterns original/* metal/*"
+  CONCURRENCY="4"
+  ALLOC_CONF="expandable_segments:True"
+  DEFAULT_BOOTSTRAP_HARDWARE="$H100_BOOTSTRAP_HARDWARE"
+  POOL_NAME="community-gpt-oss-120b-h100-0"
+  LEGACY_GPU_TYPE="NVIDIA H100 80GB HBM3"
+  MIN_VRAM_GB="80"
+  MAX_GPU_RATE="2.70"
+  POD_DISK_GB="120"
+fi
 # A paid exact-identity observation may narrow the default queue to ONE known
 # SKU/CUDA-class row plus the sealed exact minor pin. This is an experiment substrate selector, not a planner
 # fact: it keeps the row's typed prior and provenance byte-for-byte, and cannot
@@ -252,6 +339,11 @@ DEFAULT_BOOTSTRAP_HARDWARE='[{"gpu_sku":"NVIDIA RTX A5000","cuda_class":"12","vr
 BOOTSTRAP_ONLY_GPU_SKU="${WEINFER_BOOTSTRAP_ONLY_GPU_SKU:-}"
 BOOTSTRAP_ONLY_CUDA_CLASS="${WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS:-}"
 BOOTSTRAP_ONLY_CUDA_PIN="${WEINFER_BOOTSTRAP_ONLY_CUDA_PIN:-}"
+if [ "$SERVING_PROFILE" = "gpt-oss-120b-h100-v1" ] && \
+   { [ -n "$BOOTSTRAP_ONLY_GPU_SKU" ] || [ -n "$BOOTSTRAP_ONLY_CUDA_CLASS" ] || [ -n "$BOOTSTRAP_ONLY_CUDA_PIN" ]; }; then
+  echo "gpt-oss-120b-h100-v1 is already an exact one-row hardware profile; BOOTSTRAP_ONLY selectors are forbidden" >&2
+  exit 1
+fi
 if [ -n "$BOOTSTRAP_ONLY_GPU_SKU" ] || [ -n "$BOOTSTRAP_ONLY_CUDA_CLASS" ] || [ -n "$BOOTSTRAP_ONLY_CUDA_PIN" ]; then
   if [ -z "$BOOTSTRAP_ONLY_GPU_SKU" ] || [ -z "$BOOTSTRAP_ONLY_CUDA_CLASS" ] || [ -z "$BOOTSTRAP_ONLY_CUDA_PIN" ]; then
     echo "WEINFER_BOOTSTRAP_ONLY_GPU_SKU, WEINFER_BOOTSTRAP_ONLY_CUDA_CLASS, and WEINFER_BOOTSTRAP_ONLY_CUDA_PIN must be set together" >&2
@@ -295,6 +387,71 @@ fi
 
 # ---------- priced customer catalog ----------
 CATALOG='{"revision":"cat-live-1","models":[{"id":"Qwen/Qwen2.5-7B-Instruct","input_price_micro_per_mtok":100000,"output_price_micro_per_mtok":400000,"capabilities":["chat"],"created":1787432264,"context_length":8192}]}'
+if [ "$SERVING_PROFILE" = "gpt-oss-120b-h100-v1" ]; then
+  # Internal first-traversal tariff, not a published market claim.  The first
+  # sealed product lifecycle will replace this conservative price authority;
+  # customer economics never masquerade as measured COGS.
+  CATALOG='{"revision":"cat-internal-gpt-oss-120b-v1","models":[{"id":"openai/gpt-oss-120b","input_price_micro_per_mtok":900000,"output_price_micro_per_mtok":2700000,"capabilities":["chat"],"created":1788050671,"context_length":131072}]}'
+fi
+
+# Bind the deployer's own model, revision, canonical argv, context, price,
+# readiness ordering, catalog, and exact H100 identity to the same local
+# contract whose digest the OCI label authenticates.  This projection contains
+# no key or credential and runs before release fetches or provider work.
+if [ "$SERVING_PROFILE" = "gpt-oss-120b-h100-v1" ]; then
+  PROFILE_CONTRACT_PROJECTION="$(python3 - \
+    "$SERVING_PROFILE" "$SERVED_MODEL" "$MODEL_REV" "$TOKENIZER_REV" \
+    "$MAX_CTX" "$VLLM_EXTRA_ARGS" "$MAX_GPU_RATE" "$READY_PROBE_BUDGET" \
+    "$READY_PROBE_DELAY_SECS" "$DEFAULT_BOOTSTRAP_HARDWARE" "$CATALOG" <<'PY'
+import json, sys
+(
+    profile, model, model_revision, tokenizer_revision, max_context,
+    vllm_extra_args, max_gpu_rate, probe_budget, probe_delay,
+    bootstrap_hardware, catalog,
+) = sys.argv[1:]
+print(json.dumps({
+    "bootstrap_hardware": bootstrap_hardware,
+    "catalog": catalog,
+    "max_gpu_rate": max_gpu_rate,
+    "max_context": max_context,
+    "model_revision": model_revision,
+    "probe_budget": probe_budget,
+    "probe_delay_seconds": probe_delay,
+    "served_model": model,
+    "serving_profile": profile,
+    "tokenizer_revision": tokenizer_revision,
+    "vllm_extra_args": vllm_extra_args,
+}, separators=(",", ":")))
+PY
+)"
+  python3 "$SCRIPT_DIR/verify_serving_profile_contract.py" \
+    "$RUNTIME_CONTRACT_PATH" "$PROFILE_CONTRACT_PROJECTION" >&2
+fi
+
+# The H100 image carries an OCI config label containing the exact contract hash
+# baked at build time. After the local projection passes, resolve the
+# digest-pinned public manifest and config, verify both content hashes, and
+# compare the label before any trust-root fetch, storage call, or provider
+# create. Render and fake-provider modes stay wholly local; the verifier has
+# its own zero-network transport regression.
+if [ "$SERVING_PROFILE" = "gpt-oss-120b-h100-v1" ] && \
+   [ "$RENDER_ONLY" = "0" ] && [ "$DEPLOY_TEST" = "0" ]; then
+  python3 "$SCRIPT_DIR/verify_oci_image_contract.py" \
+    "$POD_IMAGE" "$RUNTIME_CONTRACT_SHA256"
+fi
+
+# Consistency check only — a sidecar mismatch means the release was
+# tampered with or republished; refuse to proceed either way.  Every local
+# profile/contract check above runs first, so drift costs no remote fetch.
+for pair in "$GW_URL.sha256:$GW_SHA" "$WORKER_URL.sha256:$WORKER_SHA"; do
+  url="${pair%:*}"; pinned="${pair##*:}"
+  remote="$(curl -fsSL "$url" | awk '{print $1}')"
+  [ "$remote" = "$pinned" ] || {
+    echo "TRUST ROOT MISMATCH for $url: remote $remote, pinned $pinned" >&2
+    exit 1
+  }
+done
+echo "trust roots consistent (gateway ${GW_SHA:0:12}…, worker ${WORKER_SHA:0:12}…)" >&2
 
 # ---------- assemble pod env (argv-passed: no quoting drift) ----------
 ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
@@ -303,9 +460,14 @@ ENV_JSON=$(APIKEYS="org-live:key-live:$(sha "$CUSTOMER_KEY")" \
   RP_KEY="$(read_provider_key)" \
   GW_URL="$GW_URL" GW_SHA="$GW_SHA" WORKER_URL="$WORKER_URL" \
   WORKER_SHA="$WORKER_SHA" POD_IMAGE="$POD_IMAGE" \
-  SERVED_MODEL="$SERVED_MODEL" QWEN_REV="$QWEN_REV" CATALOG="$CATALOG" \
+  RUNTIME_CONTRACT_SHA256="$RUNTIME_CONTRACT_SHA256" \
+  SERVING_PROFILE="$SERVING_PROFILE" SERVED_MODEL="$SERVED_MODEL" \
+  MODEL_REV="$MODEL_REV" TOKENIZER_REV="$TOKENIZER_REV" CATALOG="$CATALOG" \
   MAX_CTX="$MAX_CTX" VLLM_EXTRA_ARGS="$VLLM_EXTRA_ARGS" \
   CONCURRENCY="$CONCURRENCY" ALLOC_CONF="$ALLOC_CONF" \
+  POOL_NAME="$POOL_NAME" LEGACY_GPU_TYPE="$LEGACY_GPU_TYPE" \
+  MIN_VRAM_GB="$MIN_VRAM_GB" MAX_GPU_RATE="$MAX_GPU_RATE" \
+  POD_DISK_GB="$POD_DISK_GB" \
   BOOTSTRAP_HARDWARE="$BOOTSTRAP_HARDWARE" \
   DEMAND_QUIET_CYCLES="$DEMAND_QUIET_CYCLES" \
   READY_PROBE_BUDGET="$READY_PROBE_BUDGET" \
@@ -348,15 +510,15 @@ env = {
     "WEINFER_WORKER_KEYS": e["WORKER_RING"],
     "WEINFER_WORKER_URL": e["WORKER_URL"],
     "WEINFER_WORKER_SHA256": e["WORKER_SHA"],
-    "WEINFER_POOL": "community-qwen7b-0",
+    "WEINFER_POOL": e["POOL_NAME"],
     # Required legacy spec field; every bootstrap create overrides it
     # with the selected exact SKU + live CUDA pin.
-    "WEINFER_GPU_TYPE": "NVIDIA RTX A4500",
+    "WEINFER_GPU_TYPE": e["LEGACY_GPU_TYPE"],
     "WEINFER_CLOUD": "COMMUNITY",
     "WEINFER_IMAGE": e["POD_IMAGE"],
     "WEINFER_SERVED_MODEL": e["SERVED_MODEL"],
-    "WEINFER_MODEL_REVISION": e["QWEN_REV"],
-    "WEINFER_TOKENIZER_REVISION": e["QWEN_REV"],
+    "WEINFER_MODEL_REVISION": e["MODEL_REV"],
+    "WEINFER_TOKENIZER_REVISION": e["TOKENIZER_REV"],
     "WEINFER_MODEL_CATALOG": e["CATALOG"],
     # STATIC context authority (unmeasured bootstrap path, no profiles):
     # the catalog may never sell context the engine cannot execute.
@@ -376,13 +538,31 @@ env = {
     # The GPU create-rate bound (v0.4.0): creation itself refuses
     # missing/malformed/over-bound rates, making the watchdog's
     # wall-clock cap a HARD cap (same value the watchdog assumes).
-    "WEINFER_MAX_GPU_RATE": "0.40",
+    "WEINFER_MAX_GPU_RATE": e["MAX_GPU_RATE"],
     "VLLM_EXTRA_ARGS": e["VLLM_EXTRA_ARGS"],
     "WEINFER_CONCURRENCY": e["CONCURRENCY"],
     "PYTORCH_CUDA_ALLOC_CONF": e["ALLOC_CONF"],
-    "WEINFER_POD_DISK_GB": "40",
+    "WEINFER_POD_DISK_GB": e["POD_DISK_GB"],
     "WEINFER_POD_HTTP_PORT": "8000",
 }
+if e["SERVING_PROFILE"] == "gpt-oss-120b-h100-v1":
+    # The H100 worker pod receives the exact image-side profile authority.  The
+    # gateway adds served model and canonical argv from this same top-level
+    # profile when it creates the pod; no runtime variable can widen it.  Qwen
+    # deliberately emits none of these new keys so its frozen rendered map is
+    # byte-identical to the pre-profile deployment.
+    env["WEINFER_SERVING_PROFILE"] = e["SERVING_PROFILE"]
+    env["WEINFER_RUNTIME_CONTRACT_SHA256"] = e["RUNTIME_CONTRACT_SHA256"]
+    env["WEINFER_MIN_VRAM_GB"] = e["MIN_VRAM_GB"]
+    env["WEINFER_POD_ENV"] = json.dumps(
+        {
+            "WEINFER_SERVING_PROFILE": e["SERVING_PROFILE"],
+            "WEINFER_MODEL_REVISION": e["MODEL_REV"],
+            "WEINFER_TOKENIZER_REVISION": e["TOKENIZER_REV"],
+            "WEINFER_BACKEND_MAX_CONTEXT": e["MAX_CTX"],
+        },
+        separators=(",", ":"),
+    )
 print(json.dumps(env))
 PY
 )
