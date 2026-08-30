@@ -22,7 +22,7 @@ import json
 import sys
 
 value = json.load(open(sys.argv[1]))
-assert value["WEINFER_GATEWAY_SHA256"] == "18ab0571ed8ae38edbf5461f5b509f293ff5e0f36002443c2683bc853d421719"
+assert value["WEINFER_GATEWAY_SHA256"] == "abe8f8cd86848bf2845b95fa78d5a2677b01d5afc17e5a27dbfc4784f27e827c"
 assert value["WEINFER_BOOTSTRAP_MODE"] == "1"
 hardware = json.loads(value["WEINFER_BOOTSTRAP_HARDWARE"])
 assert len(hardware) == 11
