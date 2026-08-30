@@ -16,6 +16,8 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+      - name: immutable runtime contract regression
+        run: python3 runtime/static_regression.py
       - name: lowercase image name (registries reject uppercase)
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
@@ -36,9 +38,9 @@ jobs:
           echo "IMMUTABLE: ${IMAGE}@${{ steps.push.outputs.digest }}"
 
   # Zero-GPU container smoke: proves the container executes OUR
-  # entrypoint, the hosted worker binary downloads, sha-verifies, and
-  # RUNS on this image, and the container fails closed when the engine
-  # cannot come up.  No GPU, no provider, no spend.
+  # entrypoint, the hosted worker binary downloads and sha-verifies, the
+  # released worker executes on this image, and the container fails closed
+  # when the engine cannot come up. No GPU, no provider, no spend.
   smoke:
     needs: build
     runs-on: ubuntu-latest
@@ -55,16 +57,69 @@ jobs:
           set -x
           WORKER_URL="https://github.com/${{ github.repository }}/releases/download/worker-v0.1.0/weinfer-worker"
           WORKER_SHA="$(curl -fsSL https://github.com/${{ github.repository }}/releases/download/worker-v0.1.0/weinfer-worker.sha256 | awk '{print $1}')"
-          docker run --rm \
+          set +e
+          timeout --signal=TERM --kill-after=10s 180s docker run --rm \
             -e WEINFER_WORKER_URL="$WORKER_URL" \
             -e WEINFER_WORKER_SHA256="$WORKER_SHA" \
-            -e WEINFER_SERVED_MODEL="Qwen/Qwen2.5-0.5B-Instruct" \
+            -e WEINFER_SERVING_PROFILE="qwen7b-consumer-v1" \
+            -e WEINFER_SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct" \
+            -e WEINFER_MODEL_REVISION="a09a35458c702b33eeacc393d103063234e8bc28" \
+            -e WEINFER_TOKENIZER_REVISION="a09a35458c702b33eeacc393d103063234e8bc28" \
+            -e WEINFER_BACKEND_MAX_CONTEXT="8192" \
+            -e VLLM_EXTRA_ARGS="--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill --enable-prefix-caching --revision a09a35458c702b33eeacc393d103063234e8bc28 --tokenizer-revision a09a35458c702b33eeacc393d103063234e8bc28 --max-model-len 8192" \
+            -e HF_HUB_OFFLINE=1 \
             -e WEINFER_GATEWAY_BASE="http://127.0.0.1:1" \
             -e WEINFER_WORKER_KEY="smoke-only" \
             "${IMAGE}:${{ github.sha }}" \
-            > smoke.log 2>&1 || true
+            > smoke.log 2>&1
+          SMOKE_STATUS=$?
+          set -e
           cat smoke.log
+          [ "$SMOKE_STATUS" != 0 ]
+          [ "$SMOKE_STATUS" != 124 ]
           grep -q "worker binary verified" smoke.log
-          grep -q "starting the pull worker" smoke.log
-          grep -q "worker starting" smoke.log
-          echo "SMOKE PASS: entrypoint executed, binary verified and ran"
+          grep -q "starting vLLM" smoke.log
+          grep -q "vLLM exited before engine readiness" smoke.log
+          ! grep -q "starting the pull worker" smoke.log
+          echo "SMOKE PASS: entrypoint verified worker and withheld registration before engine readiness"
+      - name: released worker executes in the image
+        run: |
+          set -x
+          WORKER_URL="https://github.com/${{ github.repository }}/releases/download/worker-v0.1.0/weinfer-worker"
+          WORKER_SHA="$(curl -fsSL https://github.com/${{ github.repository }}/releases/download/worker-v0.1.0/weinfer-worker.sha256 | awk '{print $1}')"
+          curl -fsSL -o weinfer-worker "$WORKER_URL"
+          echo "$WORKER_SHA  weinfer-worker" | sha256sum -c -
+          chmod +x weinfer-worker
+          set +e
+          timeout --signal=TERM --kill-after=10s 60s docker run --rm \
+            --entrypoint /tmp/weinfer-worker \
+            -v "$PWD/weinfer-worker:/tmp/weinfer-worker:ro" \
+            -e WEINFER_GATEWAY_BASE="http://127.0.0.1:1" \
+            -e WEINFER_ENGINE_BASE="http://127.0.0.1:8000" \
+            -e WEINFER_WORKER_KEY="smoke-only" \
+            -e WEINFER_SERVED_MODEL="Qwen/Qwen2.5-7B-Instruct" \
+            "${IMAGE}:${{ github.sha }}" > worker.log 2>&1
+          WORKER_STATUS=$?
+          set -e
+          cat worker.log
+          grep -q "worker starting" worker.log
+          [ "$WORKER_STATUS" != 125 ]
+          echo "WORKER PASS: sha-bound released binary executed in the built image"
+      - name: immutable bytes and profile gate fail closed
+        run: |
+          set -x
+          docker run --rm --entrypoint python3 "${IMAGE}:${{ github.sha }}" \
+            /weinfer/runtime/verify_runtime.py --static > static.json
+          grep -q 'weinfer_image_static_verification_v1' static.json
+          set +e
+          docker run --rm "${IMAGE}:${{ github.sha }}" > missing-profile.log 2>&1
+          MISSING=$?
+          docker run --rm -e WEINFER_SERVING_PROFILE=typo \
+            "${IMAGE}:${{ github.sha }}" > unknown-profile.log 2>&1
+          UNKNOWN=$?
+          set -e
+          [ "$MISSING" != 0 ]
+          [ "$UNKNOWN" != 0 ]
+          grep -q 'WEINFER_SERVING_PROFILE is required' missing-profile.log
+          grep -q 'unknown WEINFER_SERVING_PROFILE' unknown-profile.log
+          echo "FAIL-CLOSED PASS: static bytes verified; missing/unknown profiles refused"

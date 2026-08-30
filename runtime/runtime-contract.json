@@ -1,0 +1,25 @@
+{
+  "object": "weinfer_pod_runtime_contract_v1",
+  "profiles": {
+    "gpt-oss-120b-h100-v1": {
+      "cuda_class": "12",
+      "engine_ready_timeout_seconds": 1200,
+      "max_context_tokens": 131072,
+      "max_provider_rate_micro_per_hour": 2700000,
+      "model": "openai/gpt-oss-120b",
+      "model_revision": "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+      "required_hardware": "one NVIDIA H100 with compute capability 9.0",
+      "tokenizer_revision": "b5c939de8f754692c1647ca79fbf85e8c1e70f8a",
+      "vllm_canonical_args": "--seed 0 --max-num-batched-tokens 8192 --max-num-seqs 4 --gpu-memory-utilization 0.95 --enable-chunked-prefill --enable-prefix-caching --dtype bfloat16 --kv-cache-dtype fp8 --calculate-kv-scales --tensor-parallel-size 1 --served-model-name gpt-oss-120b --ignore-patterns original/* metal/* --revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a --tokenizer-revision b5c939de8f754692c1647ca79fbf85e8c1e70f8a --max-model-len 131072"
+    },
+    "qwen7b-consumer-v1": {
+      "engine_ready_timeout_seconds": 3600,
+      "max_context_tokens": 8192,
+      "max_provider_rate_micro_per_hour": 400000,
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "model_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "tokenizer_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "vllm_canonical_args": "--seed 0 --max-num-batched-tokens 16384 --max-num-seqs 256 --gpu-memory-utilization 0.92 --enable-chunked-prefill --enable-prefix-caching --revision a09a35458c702b33eeacc393d103063234e8bc28 --tokenizer-revision a09a35458c702b33eeacc393d103063234e8bc28 --max-model-len 8192"
+    }
+  }
+}
