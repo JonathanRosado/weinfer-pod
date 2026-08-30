@@ -13,11 +13,14 @@ tactic selected by FlashInfer's upstream `FAST_BUILD` contract.  Its tactic,
 source set, and AOT-before-JIT runtime binding are recorded in the image
 manifest. The upstream `ENABLE_FP8` define is retained because a vendored shared
 utility header places generic and BF16 packed types behind that guard. An
-exact-hash source transform disables the separate FP8 and FP8/int4 runner
-branches in both the binding and explicit-instantiation sources while leaving
-the MXFP4 block intact; no FP8 activation tactic or kernel source is compiled,
-and the manifest records the compatibility define, scope define, and both
-transforms.
+exact-hash source transform preserves the complete upstream runner selection
+behind `#else`, while this image's required scope define admits only the tuple
+the pinned vLLM path sends: BF16 input and output, byte-packed MXFP4 storage,
+and W4 group scaling. That tuple constructs the BF16/FP4 runner supplied by the
+one retained kernel source; a different tuple raises a named refusal when the
+runner is constructed. No FP8 activation tactic or kernel source is compiled,
+and the manifest records the compatibility define, exact scope define, runtime
+tuple, and both reversible transforms.
 FlashInfer's misleadingly named `flashinfer_cutlass_fused_moe_sm100_ops.cu` is
 also retained and named in the manifest because upstream uses it as the shared
 PyTorch binding source for both its SM90 and SM100 module generators.

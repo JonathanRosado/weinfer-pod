@@ -29,15 +29,31 @@ VLLM_VERSION = "0.11.0"
 VLLM_BACKPORT_COMMIT = "c42ff4f4fdc4a4d48ccef18b8067995f6c19e6ec"
 VLLM_PATCH_SHA256 = "69e6909b439a45baf68ea9fe02f5ca208aea5aa62e1eaf4e559f26a55378f1ad"
 VLLM_SOURCE_SHA256 = "a8a13a30446f621a190674663e46c00a1e49175ce5591c1b05aaa79bab888567"
+VLLM_MXFP4_CALL_SOURCE = (
+    "vllm/model_executor/layers/quantization/mxfp4.py"
+)
+VLLM_MXFP4_CALL_SOURCE_SHA256 = (
+    "69f4105640bd466d463ccf9302164d35e9299f8e9228568dd52a9c7d66146b75"
+)
 FLASHINFER_VERSION = "0.3.1"
 FLASHINFER_SOURCE_SHA256 = "dbca0c0c36d4fd2f559021b5d9c356681501b14a3cf2ec3d37d53d17527dcc7b"
-FLASHINFER_FP8_RUNNER_SCOPE_POLICY = (
+FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_POLICY = (
     "retain ENABLE_FP8 for vendored shared PackType definitions while compiling "
-    "the binding and explicit-instantiation sources with unused FP8 runner "
-    "branches disabled"
+    "only the exact SM90 BF16-activation/MXFP4-weight runner requested by the "
+    "pinned vLLM launch path"
 )
-FLASHINFER_FP8_RUNNER_SCOPE_SOURCES = [
+FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT = {
+    "activation_dtype": "bfloat16",
+    "output_dtype": "bfloat16",
+    "use_deepseek_fp8_block_scale": False,
+    "use_mxfp8_act_scaling": False,
+    "use_w4_group_scaling": True,
+    "weight_storage_dtype": "uint8",
+    "weight_template_dtype": "mxfp4_e2m1",
+}
+FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES = [
     {
+        "kind": "explicit_instantiations",
         "path": (
             "data/csrc/fused_moe/cutlass_backend/"
             "cutlass_fused_moe_instantiation.cu"
@@ -45,11 +61,15 @@ FLASHINFER_FP8_RUNNER_SCOPE_SOURCES = [
         "preimage_sha256": (
             "56c5cdb2e92fe48cbe8952e17e91d46ce61a82a45dca27f82fa13a43bacced1f"
         ),
+        "region_sha256": (
+            "f1abc4251525d03273b1529bae2b31e54664abadb32c9e13bd1768f1de4e632f"
+        ),
         "source_sha256": (
-            "b24efa82fab95a873cb1e563cb1e140ed9bd2e0eabefb52ae895b6618b59b311"
+            "5bf1e23d1fb79f1dd786b52b1995cf65c061bf425fbd290cfae3450cbf4f1804"
         ),
     },
     {
+        "kind": "runtime_binding",
         "path": (
             "data/csrc/fused_moe/cutlass_backend/"
             "flashinfer_cutlass_fused_moe_sm100_ops.cu"
@@ -57,8 +77,11 @@ FLASHINFER_FP8_RUNNER_SCOPE_SOURCES = [
         "preimage_sha256": (
             "87bf2788f40f752bff7172c13758e6f99d48cb0b73eea11a9fc301203fe90655"
         ),
+        "region_sha256": (
+            "8f73110314a13c2914ac1d457502ac7c566f8038d7fe1e1fb0da6e32c20eaee5"
+        ),
         "source_sha256": (
-            "81866ae743a6ca1c19cd7e1e55894163ddfe133c290a77f5c1f25249e41dc4b5"
+            "7661c90f654156ad2ad42134a6e8c4194ccf8664601501187fa984c937553928"
         ),
     },
 ]
@@ -121,7 +144,7 @@ EXPECTED_FUSED_MOE_SOURCE_SUFFIXES = [
 ]
 EXPECTED_COMPATIBILITY_COMPILE_DEFINES = ["ENABLE_FP8"]
 EXPECTED_RUNNER_SCOPE_COMPILE_DEFINES = [
-    "WEINFER_DISABLE_FP8_RUNNER_BRANCHES"
+    "WEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE"
 ]
 EXPECTED_REMOVED_COMPILE_DEFINES = ["COMPILE_HOPPER_TMA_GEMMS"]
 EXPECTED_RUNTIME_BINDING = (
@@ -248,6 +271,13 @@ def verify_static() -> dict[str, Any]:
         "upstream_commit": VLLM_BACKPORT_COMMIT,
     } or sha256(vllm_source) != VLLM_SOURCE_SHA256:
         raise RuntimeError("vLLM backport source/marker drift")
+    vllm_mxfp4_source = purelib / VLLM_MXFP4_CALL_SOURCE
+    if (
+        not vllm_mxfp4_source.is_file()
+        or vllm_mxfp4_source.is_symlink()
+        or sha256(vllm_mxfp4_source) != VLLM_MXFP4_CALL_SOURCE_SHA256
+    ):
+        raise RuntimeError("vLLM SM90 MXFP4 call source drift")
 
     flashinfer_root = purelib / "flashinfer"
     flashinfer_source = flashinfer_root / "jit" / "core.py"
@@ -267,35 +297,38 @@ def verify_static() -> dict[str, Any]:
     ):
         raise RuntimeError("FlashInfer no-JIT source/marker drift")
 
-    fp8_runner_scope_marker_path = (
+    exact_runner_scope_marker_path = (
         flashinfer_root
         / "data/csrc/fused_moe/cutlass_backend/"
-        ".weinfer-fp8-runner-scope.json"
+        ".weinfer-exact-mxfp4-runner-scope.json"
     )
-    fp8_runner_scope_marker = read_json(fp8_runner_scope_marker_path)
+    exact_runner_scope_marker = read_json(exact_runner_scope_marker_path)
     require_keys(
-        fp8_runner_scope_marker,
-        {"object", "policy", "sources"},
-        "FlashInfer FP8 runner-scope marker",
+        exact_runner_scope_marker,
+        {"object", "policy", "runner", "sources"},
+        "FlashInfer exact MXFP4 runner-scope marker",
     )
     if (
-        fp8_runner_scope_marker["object"]
-        != "weinfer_flashinfer_fp8_runner_scope_v1"
-        or fp8_runner_scope_marker["policy"]
-        != FLASHINFER_FP8_RUNNER_SCOPE_POLICY
-        or fp8_runner_scope_marker["sources"]
-        != FLASHINFER_FP8_RUNNER_SCOPE_SOURCES
+        exact_runner_scope_marker["object"]
+        != "weinfer_flashinfer_exact_mxfp4_runner_scope_v1"
+        or exact_runner_scope_marker["policy"]
+        != FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_POLICY
+        or exact_runner_scope_marker["runner"]
+        != FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT
+        or exact_runner_scope_marker["sources"]
+        != FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES
     ):
-        raise RuntimeError("FlashInfer FP8 runner-scope marker drift")
-    for record in FLASHINFER_FP8_RUNNER_SCOPE_SOURCES:
+        raise RuntimeError("FlashInfer exact MXFP4 runner-scope marker drift")
+    for record in FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES:
         source = flashinfer_root / record["path"]
         if not source.is_file() or source.is_symlink():
             raise RuntimeError(
-                f"FlashInfer FP8 runner-scope source missing or symlinked: {record['path']}"
+                "FlashInfer exact MXFP4 runner-scope source missing or "
+                f"symlinked: {record['path']}"
             )
         if sha256(source) != record["source_sha256"]:
             raise RuntimeError(
-                f"FlashInfer FP8 runner-scope source drift: {record['path']}"
+                f"FlashInfer exact MXFP4 runner-scope source drift: {record['path']}"
             )
 
     manifest = read_json(AOT_MANIFEST_PATH)
@@ -326,7 +359,12 @@ def verify_static() -> dict[str, Any]:
         "compile_define": "FAST_BUILD",
         "compatibility_compile_defines": EXPECTED_COMPATIBILITY_COMPILE_DEFINES,
         "cta_shape": [128, 128, 128],
-        "fp8_runner_scope_sources": FLASHINFER_FP8_RUNNER_SCOPE_SOURCES,
+        "exact_mxfp4_runner_contract": (
+            FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT
+        ),
+        "exact_mxfp4_runner_scope_sources": (
+            FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES
+        ),
         "generated_tactic": EXPECTED_FUSED_MOE_TACTIC,
         "image_build_dynamic_load_validation": "torch.classes.FusedMoeRunner",
         "link_satisfaction_source": EXPECTED_UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
@@ -341,6 +379,8 @@ def verify_static() -> dict[str, Any]:
         "source_suffixes": EXPECTED_FUSED_MOE_SOURCE_SUFFIXES,
         "upstream_fast_build": True,
         "upstream_shared_binding_source": EXPECTED_UPSTREAM_SHARED_BINDING_SOURCE,
+        "vllm_mxfp4_call_source": VLLM_MXFP4_CALL_SOURCE,
+        "vllm_mxfp4_call_source_sha256": VLLM_MXFP4_CALL_SOURCE_SHA256,
         "weight_dtype": "mxfp4_e2m1",
     }:
         raise RuntimeError("FlashInfer fused-MoE AOT scope drift")
@@ -381,8 +421,8 @@ def verify_static() -> dict[str, Any]:
 
     return {
         "aot_manifest_sha256": sha256(AOT_MANIFEST_PATH),
-        "flashinfer_fp8_runner_scope_sources": (
-            FLASHINFER_FP8_RUNNER_SCOPE_SOURCES
+        "flashinfer_exact_mxfp4_runner_scope_sources": (
+            FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES
         ),
         "flashinfer_no_jit_source_sha256": FLASHINFER_SOURCE_SHA256,
         "profiles": sorted(contract["profiles"]),

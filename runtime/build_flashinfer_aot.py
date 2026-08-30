@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shutil
+import sysconfig
 from importlib.metadata import version
 from pathlib import Path
 
@@ -14,6 +15,12 @@ from pathlib import Path
 MANIFEST = Path("/weinfer/runtime/flashinfer-aot-manifest.json")
 EXPECTED_ARCH = "9.0"
 EXPECTED_VERSION = "0.3.1"
+VLLM_MXFP4_CALL_SOURCE = (
+    "vllm/model_executor/layers/quantization/mxfp4.py"
+)
+VLLM_MXFP4_CALL_SOURCE_SHA256 = (
+    "69f4105640bd466d463ccf9302164d35e9299f8e9228568dd52a9c7d66146b75"
+)
 TARGET_TACTIC = (
     "gemm_grouped_sm90_nv_bf16_nv_e2m1_ue8m0_bf16_bf16_fgs_lc_"
     "128x128x128_0x0x0_0_1x1x1_warpspecialized_pingpong_epi_tma"
@@ -51,8 +58,9 @@ TARGET_STATIC_SOURCE_SUFFIXES = (
     "nv_internal/tensorrt_llm/kernels/lora/lora.cpp",
 )
 TARGET_SOURCE_SUFFIXES = TARGET_STATIC_SOURCE_SUFFIXES + (TARGET_GENERATED_SOURCE,)
-FP8_RUNNER_SCOPE_SOURCES = (
+EXACT_MXFP4_RUNNER_SCOPE_SOURCES = (
     {
+        "kind": "explicit_instantiations",
         "path": (
             "data/csrc/fused_moe/cutlass_backend/"
             "cutlass_fused_moe_instantiation.cu"
@@ -60,11 +68,15 @@ FP8_RUNNER_SCOPE_SOURCES = (
         "preimage_sha256": (
             "56c5cdb2e92fe48cbe8952e17e91d46ce61a82a45dca27f82fa13a43bacced1f"
         ),
+        "region_sha256": (
+            "f1abc4251525d03273b1529bae2b31e54664abadb32c9e13bd1768f1de4e632f"
+        ),
         "source_sha256": (
-            "b24efa82fab95a873cb1e563cb1e140ed9bd2e0eabefb52ae895b6618b59b311"
+            "5bf1e23d1fb79f1dd786b52b1995cf65c061bf425fbd290cfae3450cbf4f1804"
         ),
     },
     {
+        "kind": "runtime_binding",
         "path": (
             "data/csrc/fused_moe/cutlass_backend/"
             "flashinfer_cutlass_fused_moe_sm100_ops.cu"
@@ -72,14 +84,26 @@ FP8_RUNNER_SCOPE_SOURCES = (
         "preimage_sha256": (
             "87bf2788f40f752bff7172c13758e6f99d48cb0b73eea11a9fc301203fe90655"
         ),
+        "region_sha256": (
+            "8f73110314a13c2914ac1d457502ac7c566f8038d7fe1e1fb0da6e32c20eaee5"
+        ),
         "source_sha256": (
-            "81866ae743a6ca1c19cd7e1e55894163ddfe133c290a77f5c1f25249e41dc4b5"
+            "7661c90f654156ad2ad42134a6e8c4194ccf8664601501187fa984c937553928"
         ),
     },
 )
+EXACT_MXFP4_RUNNER_CONTRACT = {
+    "activation_dtype": "bfloat16",
+    "output_dtype": "bfloat16",
+    "use_deepseek_fp8_block_scale": False,
+    "use_mxfp8_act_scaling": False,
+    "use_w4_group_scaling": True,
+    "weight_storage_dtype": "uint8",
+    "weight_template_dtype": "mxfp4_e2m1",
+}
 REQUIRED_COMPATIBILITY_COMPILE_DEFINES = ("ENABLE_FP8",)
 REQUIRED_RUNNER_SCOPE_COMPILE_DEFINES = (
-    "WEINFER_DISABLE_FP8_RUNNER_BRANCHES",
+    "WEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE",
 )
 REMOVED_COMPILE_DEFINES = ("COMPILE_HOPPER_TMA_GEMMS",)
 RUNTIME_BINDING = (
@@ -129,9 +153,10 @@ def reemit_narrow_fused_moe_spec(spec, selected: list[Path]):
     # The frozen call path is BF16 activation x MXFP4 weight.  Ungrouped GEMM,
     # FP8 activation source files, FP16 and INT4 variants are outside that
     # contract.  ENABLE_FP8 is retained only because vendored shared utilities
-    # place generic and BF16 PackType definitions behind it.  Exact-hash source
-    # transforms make the separate FP8 runner guards also require the image's
-    # scope define, disabling both explicit and binding-side demand.
+    # place generic and BF16 PackType definitions behind it. Exact-hash source
+    # transforms leave the complete upstream selection behind #else, while the
+    # image's scope define admits only the BF16 input/output, uint8 storage,
+    # W4-group-scaled tuple that constructs the BF16/FP4 runner.
     # Keep upstream's exact no-op fp8_blockscale link stub because the shared
     # binding still declares that runtime-selectable interface.  The exact
     # generated tactic and source list contain no FP8 activation kernel.
@@ -282,6 +307,15 @@ def main() -> int:
         raise SystemExit("AOT image build cannot run with runtime JIT disabled")
     if version("flashinfer-python") != EXPECTED_VERSION:
         raise SystemExit("FlashInfer version drift before AOT build")
+    vllm_mxfp4_source = (
+        Path(sysconfig.get_paths()["purelib"]) / VLLM_MXFP4_CALL_SOURCE
+    )
+    if (
+        not vllm_mxfp4_source.is_file()
+        or vllm_mxfp4_source.is_symlink()
+        or sha256(vllm_mxfp4_source) != VLLM_MXFP4_CALL_SOURCE_SHA256
+    ):
+        raise SystemExit("pinned vLLM SM90 MXFP4 call source drift")
 
     # Imports happen only after the explicit architecture has been checked;
     # FlashInfer snapshots it into its compilation context at import time.
@@ -342,7 +376,10 @@ def main() -> int:
             "compatibility_compile_defines": list(
                 REQUIRED_COMPATIBILITY_COMPILE_DEFINES
             ),
-            "fp8_runner_scope_sources": list(FP8_RUNNER_SCOPE_SOURCES),
+            "exact_mxfp4_runner_contract": EXACT_MXFP4_RUNNER_CONTRACT,
+            "exact_mxfp4_runner_scope_sources": list(
+                EXACT_MXFP4_RUNNER_SCOPE_SOURCES
+            ),
             "image_build_dynamic_load_validation": fused_moe_load_validation,
             "link_satisfaction_source": UPSTREAM_FP8_BLOCKSCALE_LINK_STUB_SOURCE,
             "link_satisfaction_source_sha256": (
@@ -358,6 +395,8 @@ def main() -> int:
             "source_suffixes": list(TARGET_SOURCE_SUFFIXES),
             "upstream_fast_build": True,
             "upstream_shared_binding_source": UPSTREAM_SHARED_BINDING_SOURCE,
+            "vllm_mxfp4_call_source": VLLM_MXFP4_CALL_SOURCE,
+            "vllm_mxfp4_call_source_sha256": VLLM_MXFP4_CALL_SOURCE_SHA256,
             "weight_dtype": "mxfp4_e2m1",
         },
         "object": "weinfer_flashinfer_aot_manifest_v1",

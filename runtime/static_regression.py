@@ -53,7 +53,7 @@ def main() -> int:
     for executable in (
         "install_flashinfer.py",
         "apply_vllm_h100_backport.sh",
-        "apply_flashinfer_fp8_runner_scope.py",
+        "apply_flashinfer_exact_mxfp4_runner_scope.py",
         "apply_flashinfer_no_jit.py",
         "build_flashinfer_aot.py",
         "verify_runtime.py --static",
@@ -185,28 +185,54 @@ def main() -> int:
         synthetic = synthetic.replace(old, new)
     assert synthetic.count(b"FLASHINFER_DISABLE_JIT") == 3
 
-    fp8_runner_scope = load_module(
-        "apply_flashinfer_fp8_runner_scope",
-        RUNTIME / "apply_flashinfer_fp8_runner_scope.py",
+    exact_runner_scope = load_module(
+        "apply_flashinfer_exact_mxfp4_runner_scope",
+        RUNTIME / "apply_flashinfer_exact_mxfp4_runner_scope.py",
     )
-    assert [target["guard_count"] for target in fp8_runner_scope.TARGETS] == [1, 4]
-    for target in fp8_runner_scope.TARGETS:
-        synthetic_source = (
-            b"prefix\n"
-            + fp8_runner_scope.OLD_GUARD * target["guard_count"]
-            + b"suffix\n"
-        )
-        fixed_source = synthetic_source.replace(
-            fp8_runner_scope.OLD_GUARD,
-            fp8_runner_scope.NEW_GUARD,
-        )
-        assert fixed_source.count(fp8_runner_scope.OLD_GUARD) == 0
-        assert fixed_source.count(fp8_runner_scope.NEW_GUARD) == target["guard_count"]
+    assert exact_runner_scope.SCOPE_DEFINE == (
+        "WEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE"
+    )
+    assert [target["kind"] for target in exact_runner_scope.TARGETS] == [
+        "explicit_instantiations",
+        "runtime_binding",
+    ]
+    assert exact_runner_scope.RUNNER_CONTRACT == {
+        "activation_dtype": "bfloat16",
+        "output_dtype": "bfloat16",
+        "use_deepseek_fp8_block_scale": False,
+        "use_mxfp8_act_scaling": False,
+        "use_w4_group_scaling": True,
+        "weight_storage_dtype": "uint8",
+        "weight_template_dtype": "mxfp4_e2m1",
+    }
+    for target in exact_runner_scope.TARGETS:
         try:
-            fp8_runner_scope.transform(synthetic_source, target)
-            raise AssertionError("non-pinned FP8 runner source preimage passed")
+            exact_runner_scope.transform(b"non-pinned source\n", target)
+            raise AssertionError("non-pinned exact runner source preimage passed")
         except RuntimeError as exc:
             assert "preimage drift" in str(exc)
+        start, end, prefix = exact_runner_scope.TRANSFORMS[target["kind"]]
+        region = start + b"upstream runner selection\n"
+        synthetic = b"header\n" + region + end + b"tail\n"
+        synthetic_target = {
+            "kind": target["kind"],
+            "path": "synthetic",
+            "region_sha256": hashlib.sha256(region).hexdigest(),
+        }
+        scoped = exact_runner_scope.scope_region(synthetic, synthetic_target)
+        assert scoped.count(prefix) == 1
+        assert scoped.count(region) == 1
+        assert exact_runner_scope.recover_upstream(
+            scoped, synthetic_target
+        ) == synthetic
+    assert (
+        b"template class CutlassMoeFCRunner<__nv_bfloat16, __nv_fp4_e2m1>;"
+        in exact_runner_scope.INSTANTIATION_PREFIX
+    )
+    assert (
+        b"WeInfer exact SM90 BF16/MXFP4 runner scope refused"
+        in exact_runner_scope.BINDING_PREFIX
+    )
 
     aot = load_module("build_flashinfer_aot", RUNTIME / "build_flashinfer_aot.py")
     assert len(aot.TARGET_SOURCE_SUFFIXES) == 14
@@ -238,27 +264,31 @@ def main() -> int:
     assert verifier.EXPECTED_FUSED_MOE_SOURCE_SUFFIXES == list(
         aot.TARGET_SOURCE_SUFFIXES
     )
-    expected_runner_scope_sources = [
-        {
-            "path": target["path"],
-            "preimage_sha256": target["preimage_sha256"],
-            "source_sha256": target["source_sha256"],
-        }
-        for target in fp8_runner_scope.TARGETS
-    ]
+    expected_runner_scope_sources = exact_runner_scope.source_records()
     patched_source_suffixes = {
         record["path"].removeprefix("data/csrc/")
         for record in expected_runner_scope_sources
     }
     assert patched_source_suffixes.issubset(set(aot.TARGET_STATIC_SOURCE_SUFFIXES))
     assert (
-        verifier.FLASHINFER_FP8_RUNNER_SCOPE_POLICY
-        == fp8_runner_scope.POLICY
+        verifier.FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_POLICY
+        == exact_runner_scope.POLICY
     )
     assert (
-        verifier.FLASHINFER_FP8_RUNNER_SCOPE_SOURCES
-        == list(aot.FP8_RUNNER_SCOPE_SOURCES)
+        verifier.FLASHINFER_EXACT_MXFP4_RUNNER_SCOPE_SOURCES
+        == list(aot.EXACT_MXFP4_RUNNER_SCOPE_SOURCES)
         == expected_runner_scope_sources
+    )
+    assert (
+        verifier.FLASHINFER_EXACT_MXFP4_RUNNER_CONTRACT
+        == aot.EXACT_MXFP4_RUNNER_CONTRACT
+        == exact_runner_scope.RUNNER_CONTRACT
+    )
+    assert verifier.VLLM_MXFP4_CALL_SOURCE == aot.VLLM_MXFP4_CALL_SOURCE
+    assert (
+        verifier.VLLM_MXFP4_CALL_SOURCE_SHA256
+        == aot.VLLM_MXFP4_CALL_SOURCE_SHA256
+        == "69f4105640bd466d463ccf9302164d35e9299f8e9228568dd52a9c7d66146b75"
     )
     assert verifier.EXPECTED_COMPATIBILITY_COMPILE_DEFINES == list(
         aot.REQUIRED_COMPATIBILITY_COMPILE_DEFINES
@@ -334,7 +364,7 @@ def main() -> int:
         assert synthetic_spec.written_cuda_flags.count("-DENABLE_FP8") == 1
         assert (
             synthetic_spec.written_cuda_flags.count(
-                "-DWEINFER_DISABLE_FP8_RUNNER_BRANCHES"
+                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE"
             )
             == 1
         )
@@ -359,7 +389,7 @@ def main() -> int:
             assert "lost compatibility flag -DENABLE_FP8" in str(exc)
         synthetic_spec.ninja_path.write_text(
             good_ninja.replace(
-                "-DWEINFER_DISABLE_FP8_RUNNER_BRANCHES",
+                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE",
                 "",
                 1,
             ),
@@ -367,10 +397,11 @@ def main() -> int:
         )
         try:
             aot.verify_emitted_ninja(synthetic_spec, selected)
-            raise AssertionError("missing FP8 runner-scope define passed")
+            raise AssertionError("missing exact MXFP4 runner-scope define passed")
         except RuntimeError as exc:
             assert (
-                "lost runner-scope flag -DWEINFER_DISABLE_FP8_RUNNER_BRANCHES"
+                "lost runner-scope flag "
+                "-DWEINFER_EXACT_SM90_BF16_MXFP4_RUNNER_SCOPE"
                 in str(exc)
             )
         synthetic_spec.ninja_path.write_text(
